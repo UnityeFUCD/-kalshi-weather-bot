@@ -16,6 +16,16 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 FORECAST_SNAPSHOTS_DIR = DATA_DIR / "forecast_snapshots"
 OBSERVATIONS_DIR = DATA_DIR / "observations"
 
+# Signal report -- written every scan so you can check from any device
+# Drop this in OneDrive/Google Drive for mobile access
+SIGNAL_REPORT_PATH = PROJECT_ROOT / "signals.txt"
+
+# --- Owner Location ----------------------------------------------------------
+# Aurora, CO 80013 -- Mountain Time (UTC-7 standard, UTC-6 DST)
+OWNER_TIMEZONE = "America/Denver"
+# Note: Bot trades NYC weather, but owner is in Mountain Time
+# All user-facing times are shown in MT, all market logic uses ET
+
 # --- Kalshi API (PRODUCTION) -------------------------------------------------
 KALSHI_API_KEY_ID = os.environ.get(
     "KALSHI_API_KEY_ID",
@@ -26,7 +36,7 @@ KALSHI_PRIVATE_KEY_PATH = os.environ.get(
     str(KEYS_DIR / "kalshi_private_key.pem")
 )
 
-# Both read and trade on PRODUCTION now
+# Both read and trade on PRODUCTION
 KALSHI_PROD_URL = "https://api.elections.kalshi.com"
 KALSHI_DEMO_URL = "https://demo-api.kalshi.co"
 KALSHI_READ_URL = KALSHI_PROD_URL

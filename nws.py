@@ -88,29 +88,29 @@ class NWSClient:
         forecast = self.get_forecast()
         if not forecast:
             return None
-        
+
         periods = forecast.get("properties", {}).get("periods", [])
-        
+
         for period in periods:
             if period.get("isDaytime", False):
                 temp = period.get("temperature")
                 name = period.get("name", "")
                 logger.info("NWS forecast: %s high = %dF", name, temp)
                 return temp
-        
+
         logger.warning("No daytime period found in NWS forecast")
         return None
 
     def get_high_forecast_for_date(self, target_date):
         """
         Get the forecasted high for a SPECIFIC date from the 7-day forecast.
-        
+
         Args:
             target_date: datetime.date object for the target day
-            
+
         Returns:
             (temperature_F, period_name) tuple, or (None, None) if not found
-        
+
         The NWS 7-day forecast has periods like:
             "Today" (daytime), "Tonight" (nighttime),
             "Monday" (daytime), "Monday Night" (nighttime), etc.
@@ -119,13 +119,13 @@ class NWSClient:
         forecast = self.get_forecast()
         if not forecast:
             return None, None
-        
+
         periods = forecast.get("properties", {}).get("periods", [])
-        
+
         for period in periods:
             if not period.get("isDaytime", False):
                 continue
-            
+
             # Parse the startTime to get the date
             start_str = period.get("startTime", "")
             try:
@@ -134,14 +134,14 @@ class NWSClient:
                 period_date = start_dt.date()
             except (ValueError, TypeError):
                 continue
-            
+
             if period_date == target_date:
                 temp = period.get("temperature")
                 name = period.get("name", "")
                 logger.info("NWS forecast for %s (%s): high = %dF",
                            target_date, name, temp)
                 return temp, name
-        
+
         # If exact date not found, log what we have
         logger.warning("No forecast found for %s", target_date)
         logger.info("Available daytime periods:")
@@ -151,7 +151,7 @@ class NWSClient:
                            period.get("name", "?"),
                            period.get("temperature", 0),
                            period.get("startTime", "?"))
-        
+
         return None, None
 
     def get_current_temp(self):
@@ -159,7 +159,7 @@ class NWSClient:
         obs = self.get_latest_observation("KNYC")
         if not obs:
             return None
-        
+
         props = obs.get("properties", {})
         temp_c = props.get("temperature", {}).get("value")
         if temp_c is not None:
@@ -172,14 +172,14 @@ class NWSClient:
         """Save raw API response with timestamp for backtest integrity."""
         now = datetime.now(timezone.utc)
         ts = now.strftime("%Y%m%d_%H%M%S")
-        
+
         out_dir = config.FORECAST_SNAPSHOTS_DIR if "forecast" in data_type \
             else config.OBSERVATIONS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        
+
         filename = "%s_%s.json" % (data_type, ts)
         filepath = out_dir / filename
-        
+
         try:
             with open(filepath, "w") as f:
                 json.dump({
@@ -196,18 +196,18 @@ class NWSClient:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    
+
     print("=" * 60)
     print("NWS CLIENT TEST")
     print("=" * 60)
-    
+
     nws = NWSClient()
-    
+
     print("\n[1] Today's forecast...")
     high = nws.get_today_high_forecast()
     if high is not None:
         print("  Today's forecasted high: %dF" % high)
-    
+
     print("\n[2] Tomorrow's forecast...")
     et_offset = timezone(timedelta(hours=-5))
     tomorrow = (datetime.now(et_offset) + timedelta(days=1)).date()
@@ -216,10 +216,10 @@ if __name__ == "__main__":
         print("  Tomorrow (%s, %s) forecasted high: %dF" % (tomorrow, name, temp))
     else:
         print("  Could not get tomorrow's forecast")
-    
+
     print("\n[3] Current observation...")
     temp = nws.get_current_temp()
     if temp is not None:
         print("  Current temp: %.1fF" % temp)
-    
+
     print("\n" + "=" * 60)
