@@ -107,6 +107,69 @@ GHCN_PARQUET_PATH = (
     PROJECT_ROOT / "data" / "raw" / "weather" / "observations" / "USW00094728_daily.parquet"
 )
 
+# --- Phase 4: Forecast Revision Tracking -------------------------------------
+DELTA_TRACKER_STATE_PATH = DATA_DIR / "delta_tracker_state.json"
+# Polling cadence (seconds) -- used by daily_runner enhanced mode
+POLL_PREDAWN_INTERVAL = 600     # 10 min pre-dawn
+POLL_MORNING_INTERVAL = 300     # 5 min morning (6-10 AM ET)
+POLL_AFTERNOON_INTERVAL = 120   # 2 min afternoon (10 AM - 4 PM ET)
+POLL_EVENING_INTERVAL = 300     # 5 min evening (4-8 PM ET)
+# Pre-dawn sigma floor (information state is poor before dawn)
+SIGMA_PREDAWN_FLOOR = 1.3
+
+# --- Phase 4B: METAR/ASOS Observations --------------------------------------
+# AWC Data API (primary), IEM JSON (secondary), NWS station obs (tertiary)
+# Station IDs for METAR observation
+METAR_STATIONS = {
+    "KXHIGHNY": "KNYC",   # Central Park
+    "KXHIGHCHI": "KORD",   # O'Hare
+}
+# Observation staleness threshold (minutes)
+OBS_STALE_MINUTES = 90
+# Nudge parameters
+OBS_NUDGE_K1 = 0.4           # residual-confirmed shift factor
+OBS_RESIDUAL_EWMA_SPAN = 6   # ~30 min at 5-min polling (6 obs)
+
+# --- Phase 4C: Confidence Scoring --------------------------------------------
+# Gate weights (all equal initially)
+CONFIDENCE_GATE_WEIGHTS = {
+    "forecast_freshness": 0.25,
+    "obs_freshness": 0.25,
+    "obs_alignment": 0.25,
+    "boundary_brittleness": 0.25,
+}
+# Forecast freshness: max age (minutes) before penalty
+FORECAST_FRESH_MINUTES = 120
+# Obs alignment: max |residual_ewma| before penalty
+OBS_ALIGNMENT_MAX_RESIDUAL = 2.0
+# Boundary brittleness: z = distance_to_boundary / σ
+BOUNDARY_BRITTLENESS_Z_THRESHOLD = 1.0
+# Dynamic MIN_EDGE by time-of-day (base values, scaled by confidence)
+MIN_EDGE_PREDAWN = 0.20       # 20% -- high uncertainty
+MIN_EDGE_MORNING = 0.14       # 14%
+MIN_EDGE_AFTERNOON = 0.10     # 10%
+MIN_EDGE_EVENING = 0.08       # 8% -- most information available
+# Confidence floor for trading
+MIN_CONFIDENCE_TO_TRADE = 0.3
+# Pre-dawn extra gates
+PREDAWN_MIN_CONFIDENCE = 0.6
+PREDAWN_MIN_EDGE = 0.20
+PREDAWN_MIN_Z = 1.0
+
+# --- Phase 5: Ensemble σ ----------------------------------------------------
+ENSEMBLE_ENABLED = True
+# Open-Meteo Ensemble API
+ENSEMBLE_MODELS = ["ecmwf_ifs025", "gfs_seamless"]
+# σ composition: σ_final = max(σ_base, α×σ_ens, σ_base + β×revision_vol, σ_base + γ×boundary_risk)
+ENSEMBLE_ALPHA = 1.1          # scale factor on ensemble spread
+ENSEMBLE_BETA = 0.5           # revision volatility contribution
+ENSEMBLE_GAMMA = 0.3          # boundary risk contribution
+ENSEMBLE_CACHE_MINUTES = 60   # how long to cache ensemble results
+
+# --- Phase 4.5: Settlement DB -----------------------------------------------
+SETTLEMENT_DB_PATH = DATA_DIR / "settlements.json"
+NWS_CLIMATE_REPORT_URL = "https://forecast.weather.gov/product.php?site=OKX&issuedby=NYC&product=CLI"
+
 # --- Logging -----------------------------------------------------------------
 LOG_FILE = LOGS_DIR / "bot.log"
 LOG_LEVEL = "INFO"

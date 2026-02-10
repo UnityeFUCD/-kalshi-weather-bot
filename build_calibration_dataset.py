@@ -52,51 +52,19 @@ def find_observation_file():
 
 def fetch_recent_from_open_meteo(start_date, end_date):
     """
-    Fill the GHCN-Daily lag gap with Open-Meteo data.
-    
-    Open-Meteo serves ERA5 reanalysis + recent observations with NO lag.
-    Free, no API key needed.
-    
-    Returns list of dicts: [{date, tmax_f}, ...]
+    DISABLED -- Open-Meteo gap-fill removed per Phase 4 calibration patch.
+
+    Settlement-only calibration: we ONLY use GHCN-Daily (official NWS data)
+    as ground truth.  Open-Meteo ERA5/reanalysis data does NOT match NWS
+    settlement methodology (different station, different rounding, different
+    measurement window).  Using it introduces systematic bias into sigma
+    calibration.
+
+    This function now returns an empty list.  The gap between GHCN-Daily
+    availability and forecast dates is handled by waiting for GHCN to update.
     """
-    import requests
-    
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": 40.7831,      # Central Park
-        "longitude": -73.9712,
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "daily": "temperature_2m_max",
-        "temperature_unit": "fahrenheit",
-        "timezone": "America/New_York",
-    }
-    
-    logger.info("Fetching recent obs from Open-Meteo (%s to %s)...", start_date, end_date)
-    
-    try:
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        
-        dates = data.get("daily", {}).get("time", [])
-        temps = data.get("daily", {}).get("temperature_2m_max", [])
-        
-        records = []
-        for d, t in zip(dates, temps):
-            if t is not None:
-                records.append({
-                    "date": datetime.strptime(d, "%Y-%m-%d").date(),
-                    "tmax_f": round(t),
-                    "source": "open_meteo",
-                })
-        
-        logger.info("  Got %d days from Open-Meteo", len(records))
-        return records
-        
-    except Exception as e:
-        logger.warning("Open-Meteo archive fetch failed: %s", e)
-        return []
+    logger.info("Open-Meteo gap-fill DISABLED (settlement-only calibration)")
+    return []
 
 
 def load_settled_observations(obs_parquet_path):

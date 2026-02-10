@@ -6,6 +6,13 @@ probabilities to Kalshi prices, and trades edges above threshold.
 
 Supports multiple markets via market_registry.py.
 
+Phase 4/5 enhancements:
+  - Hourly-derived μ (more accurate than period high)
+  - Forecast revision tracking with delta features
+  - METAR/ASOS real-time observations with μ nudges
+  - Confidence scoring with dynamic MIN_EDGE
+  - Ensemble σ from Open-Meteo (ECMWF + GFS)
+
 Usage:
     python bot.py scan          # Scan only, no trading (safe to run anytime)
     python bot.py paper         # Paper trading (logs what WOULD trade)
@@ -25,6 +32,12 @@ from nws import NWSClient
 from model import parse_bucket_title, compute_signals, compute_fee, Signal
 from risk import RiskManager
 from market_registry import get_enabled_markets
+from delta_tracker import DeltaTracker
+from metar_obs import MetarObserver
+from confidence import (compute_confidence, compute_dynamic_min_edge,
+                        compute_boundary_z, extract_bucket_boundaries,
+                        passes_predawn_gates)
+from ensemble import EnsembleForecaster
 import config
 
 # --- Logging Setup -----------------------------------------------------------
@@ -54,8 +67,22 @@ class WeatherBot:
         # Multi-market: one NWS client per enabled market
         self._enabled_markets = get_enabled_markets()
         self._nws_clients = {}
+        self._delta_trackers = {}
+        self._metar_observers = {}
+        self._ensemble_forecasters = {}
+
         for mc in self._enabled_markets:
             self._nws_clients[mc.series_ticker] = NWSClient(market_config=mc)
+            self._delta_trackers[mc.series_ticker] = DeltaTracker(mc.series_ticker)
+
+            # METAR observer
+            station = config.METAR_STATIONS.get(mc.series_ticker, mc.nws_station)
+            self._metar_observers[mc.series_ticker] = MetarObserver(
+                station, nws_client=self._nws_clients[mc.series_ticker])
+
+            # Ensemble forecaster (uses lat/lon from NWS config)
+            lat_lon = self._get_lat_lon(mc)
+            self._ensemble_forecasters[mc.series_ticker] = EnsembleForecaster(*lat_lon)
 
         # Backward compat: self.nws points to first market's client
         if self._enabled_markets:
@@ -78,6 +105,8 @@ class WeatherBot:
         self._last_target_date = None
         self._last_mu = None
         self._last_sigma = None
+        self._last_confidence = None
+        self._last_dynamic_edge = None
 
         # Paper trading tracker
         if mode == "paper":
@@ -88,6 +117,15 @@ class WeatherBot:
 
         # Accumulate signal report sections across markets
         self._report_sections = []
+
+    def _get_lat_lon(self, mc):
+        """Get latitude/longitude for a market config."""
+        # Map NWS grid offices to approximate lat/lon
+        office_coords = {
+            "OKX": (40.7831, -73.9712),   # NYC
+            "LOT": (41.9742, -87.9073),   # Chicago O'Hare
+        }
+        return office_coords.get(mc.nws_grid_office, (40.7831, -73.9712))
 
     def run_cycle(self):
         """
@@ -120,51 +158,115 @@ class WeatherBot:
         """
         Run a single scan-and-trade cycle for one market.
 
-        Args:
-            mc: MarketConfig for this market
-            nws_client: NWSClient configured for this market
+        Enhanced with Phase 4/5:
+          - Hourly μ from delta tracker
+          - METAR observation nudges
+          - Confidence scoring
+          - Dynamic MIN_EDGE
+          - Ensemble σ
         """
         self.logger.info("=== Market: %s (%s) ===", mc.series_ticker, mc.display_name)
 
-        # -- Step 1: NWS Forecast (for the correct target date) --
+        delta_tracker = self._delta_trackers[mc.series_ticker]
+        metar_obs = self._metar_observers[mc.series_ticker]
+        ensemble = self._ensemble_forecasters[mc.series_ticker]
+
+        # -- Step 1: Determine target date and base sigma --
         et_offset = timezone(timedelta(hours=-5))
         now_et = datetime.now(et_offset)
+        hour_et = now_et.hour
 
-        if now_et.hour >= 8:
-            # After 8 AM: trade tomorrow's market, need tomorrow's forecast
+        if hour_et >= 8:
             target_date = (now_et + timedelta(days=1)).date()
-            forecast_temp, period_name = nws_client.get_high_forecast_for_date(target_date)
-            sigma = mc.sigma_1day  # 1-day ahead = more uncertainty
+            sigma_base = mc.sigma_1day
         else:
-            # Before 8 AM: trade today's market
             target_date = now_et.date()
-            forecast_temp, period_name = nws_client.get_high_forecast_for_date(target_date)
-            # Same-day sigma depends on time
-            if now_et.hour < 8:
-                sigma = mc.sigma_1day
-            elif now_et.hour < 14:
-                sigma = mc.sigma_sameday_am
+            if hour_et < 6:
+                sigma_base = max(mc.sigma_1day, config.SIGMA_PREDAWN_FLOOR)
+            elif hour_et < 14:
+                sigma_base = mc.sigma_sameday_am
             else:
-                sigma = mc.sigma_sameday_pm
+                sigma_base = mc.sigma_sameday_pm
+
+        # -- Step 1b: Hourly-derived μ (Phase 4A) --
+        # Try hourly forecast first (more accurate), fall back to period high
+        snapshot, is_revision = delta_tracker.process_hourly_forecast(nws_client, target_date)
+
+        hourly_mu = delta_tracker.get_hourly_mu(target_date)
+        forecast_temp, period_name = nws_client.get_high_forecast_for_date(target_date)
 
         if forecast_temp is None:
-            # Fallback to first daytime period
             self.logger.warning("Could not get forecast for %s -- trying fallback", target_date)
             forecast_temp = nws_client.get_today_high_forecast()
 
-        if forecast_temp is None:
-            self.logger.error("Failed to get NWS forecast for %s -- skipping", mc.series_ticker)
+        if forecast_temp is None and hourly_mu is None:
+            self.logger.error("Failed to get any forecast for %s -- skipping", mc.series_ticker)
             return []
+
+        # Use hourly max as primary μ, period high as fallback
+        if hourly_mu is not None:
+            mu = hourly_mu - mc.forecast_bias
+            self.logger.info("Using hourly-derived mu=%.1f (hourly_max=%.0f, period_high=%s)",
+                            mu, hourly_mu, forecast_temp)
+        else:
+            mu = forecast_temp - mc.forecast_bias
+            self.logger.info("Using period-high mu=%.1f (forecast=%d)", mu, forecast_temp)
+
+        if forecast_temp is None:
+            forecast_temp = int(round(hourly_mu)) if hourly_mu else 0
+
+        # Log revision info
+        if is_revision:
+            delta = delta_tracker.latest_delta(target_date)
+            self.logger.info("FORECAST REVISION #%d: delta_tmax=%.1f",
+                            delta.revision_number, delta.delta_tmax_hourly)
 
         self._last_forecast_temp = forecast_temp
         self._last_forecast_time = datetime.now(timezone.utc)
         self._last_target_date = target_date
 
-        mu = forecast_temp - mc.forecast_bias
+        # -- Step 1c: METAR observation nudge (Phase 4B) --
+        obs_temp, obs_source, obs_time = metar_obs.get_current_temp()
+        residual_ewma = None
+
+        if obs_temp is not None:
+            self.logger.info("METAR obs: %.1fF from %s", obs_temp, obs_source)
+            # Only apply nudge and compute residual for same-day trading
+            if target_date == now_et.date():
+                mu_before = mu
+                mu = metar_obs.compute_mu_nudge(mu)
+                if abs(mu - mu_before) > 0.01:
+                    self.logger.info("Observation nudge: mu %.1f -> %.1f", mu_before, mu)
+                _, residual_ewma = metar_obs.compute_residual(mu)
+            else:
+                # Next-day: obs don't inform forecast, skip residual for confidence
+                self.logger.info("Next-day trade: skipping obs residual for confidence")
+
         self._last_mu = mu
+
+        # -- Step 1d: Ensemble σ (Phase 5) --
+        sigma = sigma_base
+        if config.ENSEMBLE_ENABLED:
+            try:
+                sigma_ens, n_members, _ = ensemble.get_ensemble_sigma(target_date)
+                rev_vol = delta_tracker.revision_volatility(target_date)
+
+                sigma = ensemble.compose_sigma(
+                    sigma_base=sigma_base,
+                    sigma_ens=sigma_ens,
+                    revision_volatility=rev_vol,
+                )
+                if sigma != sigma_base:
+                    self.logger.info("Ensemble sigma: base=%.2f -> composed=%.2f "
+                                    "(ens=%.2f, %d members, rev_vol=%.2f)",
+                                    sigma_base, sigma, sigma_ens or 0, n_members, rev_vol)
+            except Exception as e:
+                self.logger.warning("Ensemble fetch failed, using base sigma: %s", e)
+                sigma = sigma_base
+
         self._last_sigma = sigma
 
-        self.logger.info("NWS Forecast for %s: %dF | Model: mu=%.1f, sigma=%.1f",
+        self.logger.info("NWS Forecast for %s: %dF | Model: mu=%.1f, sigma=%.2f",
                         target_date, forecast_temp, mu, sigma)
 
         # -- Step 2: Fetch Markets --
@@ -184,9 +286,9 @@ class WeatherBot:
         tomorrow = now_et + timedelta(days=1)
         tomorrow_str = tomorrow.strftime("%y") + tomorrow.strftime("%b").upper() + tomorrow.strftime("%d")
 
-        self.logger.info("Today=%s, Tomorrow=%s, Hour=%d ET", today_str, tomorrow_str, now_et.hour)
+        self.logger.info("Today=%s, Tomorrow=%s, Hour=%d ET", today_str, tomorrow_str, hour_et)
 
-        if now_et.hour >= 8:
+        if hour_et >= 8:
             target_str = tomorrow_str
             self.logger.info("After 8AM ET -- targeting tomorrow: %s", target_str)
         else:
@@ -239,8 +341,67 @@ class WeatherBot:
             self.logger.info("  %-40s bid=%sc ask=%sc vol=%5d P=%.3f",
                            m.ticker, bid_str, ask_str, m.volume, p_model)
 
-        # -- Step 4: Generate Signals --
-        # Filter out near-settled markets (bid >= 95c or ask <= 5c)
+        # -- Step 3b: Confidence scoring (Phase 4C) --
+        boundaries = extract_bucket_boundaries(buckets)
+        boundary_z = compute_boundary_z(mu, sigma, boundaries)
+
+        forecast_age = delta_tracker.forecast_age_minutes(target_date)
+        obs_age = metar_obs.get_obs_age_minutes()
+
+        confidence, gate_scores = compute_confidence(
+            forecast_age_min=forecast_age,
+            obs_age_min=obs_age,
+            residual_ewma=residual_ewma,
+            boundary_z=boundary_z,
+            hour_et=hour_et,
+        )
+
+        dynamic_min_edge = compute_dynamic_min_edge(hour_et, confidence)
+
+        # Compose boundary_risk for ensemble sigma if near boundary
+        if boundary_z is not None and boundary_z < 1.5 and config.ENSEMBLE_ENABLED:
+            boundary_risk = max(0, 1.5 - boundary_z)
+            sigma_with_boundary = ensemble.compose_sigma(
+                sigma_base=sigma,
+                boundary_risk=boundary_risk,
+            )
+            if sigma_with_boundary > sigma:
+                self.logger.info("Boundary risk sigma boost: %.2f -> %.2f (z=%.2f)",
+                                sigma, sigma_with_boundary, boundary_z)
+                sigma = sigma_with_boundary
+                self._last_sigma = sigma
+
+        self._last_confidence = confidence
+        self._last_dynamic_edge = dynamic_min_edge
+
+        self.logger.info("Confidence: %.3f | Gates: %s | Dynamic MIN_EDGE: %.1f%% | Boundary z: %s",
+                        confidence,
+                        {k: "%.2f" % v for k, v in gate_scores.items()},
+                        dynamic_min_edge * 100,
+                        "%.2f" % boundary_z if boundary_z is not None else "N/A")
+
+        # Pre-dawn gate check
+        if hour_et < 6:
+            ok, reason = passes_predawn_gates(confidence, dynamic_min_edge, boundary_z)
+            if not ok:
+                self.logger.info("Pre-dawn gate BLOCKED: %s", reason)
+                self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
+                                          buckets, market_prices, [],
+                                          confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                          boundary_z=boundary_z)
+                return []
+
+        # Confidence floor check
+        if confidence < config.MIN_CONFIDENCE_TO_TRADE:
+            self.logger.info("Confidence %.3f < %.3f minimum -- no trading",
+                            confidence, config.MIN_CONFIDENCE_TO_TRADE)
+            self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
+                                      buckets, market_prices, [],
+                                      confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                      boundary_z=boundary_z)
+            return []
+
+        # -- Step 4: Generate Signals (with dynamic MIN_EDGE) --
         filtered_prices = {}
         for ticker, price in market_prices.items():
             if 0.05 <= price <= 0.95:
@@ -248,11 +409,16 @@ class WeatherBot:
             else:
                 self.logger.info("  Skipping %s: price=%.2f (near-settled)", ticker, price)
 
-        signals = compute_signals(buckets, filtered_prices, mu, sigma)
+        signals = compute_signals(buckets, filtered_prices, mu, sigma,
+                                  min_edge=dynamic_min_edge)
 
         if not signals:
-            self.logger.info("No signals -- no edge above threshold")
-            self._write_signal_report(mc, target_date, forecast_temp, mu, sigma, buckets, market_prices, [])
+            self.logger.info("No signals -- no edge above %.1f%% dynamic threshold",
+                            dynamic_min_edge * 100)
+            self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
+                                      buckets, market_prices, [],
+                                      confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                      boundary_z=boundary_z)
             return []
 
         self.logger.info(">>> %d signal(s) found:", len(signals))
@@ -272,11 +438,16 @@ class WeatherBot:
         self.logger.info("Risk: %s", self.risk.summary())
 
         # Accumulate signal report section for this market
-        self._write_signal_report(mc, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals)
+        self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
+                                  buckets, market_prices, signals,
+                                  confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                  boundary_z=boundary_z)
 
         return signals
 
-    def _write_signal_report(self, market_config, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals):
+    def _write_signal_report(self, market_config, target_date, forecast_temp,
+                              mu, sigma, buckets, market_prices, signals,
+                              confidence=None, dynamic_edge=None, boundary_z=None):
         """Accumulate a signal report section for one market."""
         try:
             lines = []
@@ -290,7 +461,15 @@ class WeatherBot:
             lines.append("FORECAST")
             lines.append("  NWS Forecast High: %dF" % forecast_temp)
             lines.append("  Model Mean (mu):   %.1fF" % mu)
-            lines.append("  Model Sigma:       %.1fF" % sigma)
+            lines.append("  Model Sigma:       %.2fF" % sigma)
+
+            if confidence is not None:
+                lines.append("")
+                lines.append("CONFIDENCE")
+                lines.append("  Score:            %.3f" % confidence)
+                lines.append("  Dynamic MIN_EDGE: %.1f%%" % (dynamic_edge * 100 if dynamic_edge else 0))
+                lines.append("  Boundary z:       %s" % (
+                    "%.2f" % boundary_z if boundary_z is not None else "N/A"))
 
             lines.append("")
             lines.append("MARKET PRICES & MODEL PROBABILITIES")
@@ -322,7 +501,8 @@ class WeatherBot:
                         s.suggested_price, count, risk, fee))
                     lines.append("")
             else:
-                lines.append("NO SIGNALS -- no edge above %.0f%% threshold" % (config.MIN_EDGE * 100))
+                edge_pct = dynamic_edge * 100 if dynamic_edge else config.MIN_EDGE * 100
+                lines.append("NO SIGNALS -- no edge above %.1f%% threshold" % edge_pct)
 
             self._report_sections.append("\n".join(lines))
 
@@ -348,6 +528,10 @@ class WeatherBot:
             footer.append("")
             footer.append("Risk: %s" % self.risk.summary())
             footer.append("Mode: %s" % self.mode.upper())
+            if self._last_confidence is not None:
+                footer.append("Last confidence: %.3f | Dynamic edge: %.1f%%" % (
+                    self._last_confidence,
+                    self._last_dynamic_edge * 100 if self._last_dynamic_edge else 0))
             footer.append("")
 
             report = "\n".join(header) + "\n" + "\n".join(self._report_sections) + "\n" + "\n".join(footer)
@@ -483,14 +667,23 @@ class WeatherBot:
 
         return count
 
-    def run_loop(self, once=False):
-        """Main bot loop. Runs until interrupted."""
+    def run_loop(self, once=False, until_hour_mt=None):
+        """
+        Main bot loop. Runs until interrupted or past until_hour_mt.
+
+        Args:
+            once: Run single cycle then exit
+            until_hour_mt: Auto-exit after this Mountain Time hour (e.g. 16 = 4 PM MT)
+        """
         self.logger.info("=" * 60)
         self.logger.info("Kalshi Weather Bot -- %s mode", self.mode.upper())
         tickers = ", ".join(mc.series_ticker for mc in self._enabled_markets)
         self.logger.info("Enabled markets: %s", tickers)
         self.logger.info("Bankroll: $%.0f", config.BANKROLL)
-        self.logger.info("Min edge: %d%%", config.MIN_EDGE * 100)
+        self.logger.info("Base MIN_EDGE: %d%% (dynamic scaling active)", config.MIN_EDGE * 100)
+        self.logger.info("Ensemble: %s", "ENABLED" if config.ENSEMBLE_ENABLED else "DISABLED")
+        if until_hour_mt is not None:
+            self.logger.info("Auto-exit at: %d:00 MT", until_hour_mt)
         self.logger.info("=" * 60)
 
         if self.mode == "live":
@@ -502,6 +695,14 @@ class WeatherBot:
 
         cycle = 0
         while True:
+            # Market hours check
+            if until_hour_mt is not None:
+                mt = timezone(timedelta(hours=-7))
+                now_mt = datetime.now(mt)
+                if now_mt.hour >= until_hour_mt:
+                    self.logger.info("Past %d:00 MT -- auto-exiting market window", until_hour_mt)
+                    break
+
             cycle += 1
             try:
                 self.logger.info("\n%s CYCLE %d %s", "=" * 20, cycle, "=" * 20)
@@ -550,6 +751,12 @@ def main():
         default=None,
         help="Date for reconcile (YYYY-MM-DD, default: today)"
     )
+    parser.add_argument(
+        "--until",
+        type=int,
+        default=None,
+        help="Auto-exit at this MT hour (e.g. --until 16 = stop at 4 PM MT)"
+    )
     args = parser.parse_args()
 
     setup_logging("DEBUG" if args.debug else config.LOG_LEVEL)
@@ -566,7 +773,7 @@ def main():
         return
 
     bot = WeatherBot(mode=args.mode)
-    bot.run_loop(once=args.once)
+    bot.run_loop(once=args.once, until_hour_mt=args.until)
 
 
 if __name__ == "__main__":

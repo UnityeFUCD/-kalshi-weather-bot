@@ -78,11 +78,48 @@ class NWSClient:
             resp = self.session.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+            self._last_hourly_headers = dict(resp.headers)
             self._archive("hourly_forecast", data)
             return data
         except requests.RequestException as e:
             logger.error("NWS hourly forecast failed: %s", e)
             return None
+
+    def get_hourly_max_for_date(self, target_date):
+        """
+        Compute the maximum temperature from hourly forecast for a specific date.
+        This is more accurate than the period high because it uses the actual
+        hourly temperature values rather than a single summary number.
+
+        Returns (hourly_max_F, hourly_temps_list) or (None, []).
+        """
+        data = self.get_hourly_forecast()
+        if not data:
+            return None, []
+
+        periods = data.get("properties", {}).get("periods", [])
+        hourly_temps = []
+
+        for period in periods:
+            start_str = period.get("startTime", "")
+            try:
+                start_dt = datetime.fromisoformat(start_str)
+                if start_dt.date() != target_date:
+                    continue
+                temp = period.get("temperature")
+                if temp is not None:
+                    hourly_temps.append((start_dt.hour, temp))
+            except (ValueError, TypeError):
+                continue
+
+        if not hourly_temps:
+            logger.warning("No hourly temps for %s in hourly forecast", target_date)
+            return None, []
+
+        hourly_max = max(t for _, t in hourly_temps)
+        logger.info("Hourly max for %s: %dF (from %d hours)",
+                    target_date, hourly_max, len(hourly_temps))
+        return hourly_max, hourly_temps
 
     def get_latest_observation(self, station=None):
         """Get latest observation from a specific station."""
