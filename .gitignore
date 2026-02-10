@@ -6,3 +6,9 @@ logs/
 .env
 __pycache__/
 *.pyc
+keys/
+logs/
+data/
+__pycache__/
+*.pyc
+signals.txt
