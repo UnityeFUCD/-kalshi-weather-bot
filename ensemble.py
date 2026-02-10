@@ -85,33 +85,22 @@ class EnsembleForecaster:
     def compose_sigma(self, sigma_base, sigma_ens=None, revision_volatility=0.0,
                       boundary_risk=0.0):
         """
-        Compose final σ from multiple uncertainty sources.
+        Compose final σ from ensemble spread.
 
-        σ_final = max(
-            σ_base,
-            α × σ_ens,                        (ensemble spread)
-            σ_base + β × revision_volatility,  (forecast instability)
-            σ_base + γ × boundary_risk          (proximity to bucket edge)
-        )
+        Simplified: σ_final = max(σ_base, α × σ_ens)
+
+        Ensemble widens σ when weather models disagree.  No stacking with
+        revision volatility or boundary risk — those inflated σ to the point
+        where it destroyed edge on every trade.
         """
-        candidates = [sigma_base]
+        sigma_final = sigma_base
 
         if sigma_ens is not None and sigma_ens > 0:
-            candidates.append(config.ENSEMBLE_ALPHA * sigma_ens)
-
-        if revision_volatility > 0:
-            candidates.append(sigma_base + config.ENSEMBLE_BETA * revision_volatility)
-
-        if boundary_risk > 0:
-            candidates.append(sigma_base + config.ENSEMBLE_GAMMA * boundary_risk)
-
-        sigma_final = max(candidates)
+            sigma_final = max(sigma_base, config.ENSEMBLE_ALPHA * sigma_ens)
 
         if sigma_final > sigma_base:
-            logger.info("σ composed: base=%.2f -> final=%.2f (ens=%s, rev=%.2f, bnd=%.2f)",
-                       sigma_base, sigma_final,
-                       "%.2f" % sigma_ens if sigma_ens else "N/A",
-                       revision_volatility, boundary_risk)
+            logger.info("σ composed: base=%.2f -> final=%.2f (ens=%.2f, α=%.1f)",
+                       sigma_base, sigma_final, sigma_ens, config.ENSEMBLE_ALPHA)
 
         return sigma_final
 

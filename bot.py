@@ -60,8 +60,9 @@ class WeatherBot:
     Main trading bot for Kalshi weather high-temperature markets.
     """
 
-    def __init__(self, mode="scan"):
+    def __init__(self, mode="scan", force=False):
         self.mode = mode
+        self.force = force
         self.logger = logging.getLogger("bot")
 
         # Multi-market: one NWS client per enabled market
@@ -98,6 +99,8 @@ class WeatherBot:
             self.logger.info("LIVE MODE -- real money at risk")
         else:
             self.logger.info("Mode: %s", mode)
+        if self.force:
+            self.logger.warning("FORCE mode enabled: correlation blocks will be overridden")
 
         self.risk = RiskManager()
         self._last_forecast_temp = None
@@ -245,21 +248,40 @@ class WeatherBot:
         self._last_mu = mu
 
         # -- Step 1d: Ensemble σ (Phase 5) --
+        # Simple: σ = max(σ_base, α × σ_ensemble). No stacking.
         sigma = sigma_base
         if config.ENSEMBLE_ENABLED:
             try:
                 sigma_ens, n_members, _ = ensemble.get_ensemble_sigma(target_date)
-                rev_vol = delta_tracker.revision_volatility(target_date)
 
                 sigma = ensemble.compose_sigma(
                     sigma_base=sigma_base,
                     sigma_ens=sigma_ens,
-                    revision_volatility=rev_vol,
                 )
                 if sigma != sigma_base:
                     self.logger.info("Ensemble sigma: base=%.2f -> composed=%.2f "
-                                    "(ens=%.2f, %d members, rev_vol=%.2f)",
-                                    sigma_base, sigma, sigma_ens or 0, n_members, rev_vol)
+                                    "(ens=%.2f, %d members)",
+                                    sigma_base, sigma, sigma_ens or 0, n_members)
+
+                # Log ensemble σ history for future backtesting
+                try:
+                    import json as _json
+                    _ens_record = {
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "target_date": str(target_date),
+                        "series_ticker": mc.series_ticker,
+                        "sigma_base": round(sigma_base, 4),
+                        "sigma_ens": round(sigma_ens, 4) if sigma_ens else None,
+                        "sigma_composed": round(sigma, 4),
+                        "n_members": n_members,
+                        "ensemble_mean": round(ensemble.get_ensemble_mean(target_date) or 0, 2),
+                        "forecast_mu": round(mu, 2),
+                    }
+                    config.ENSEMBLE_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(config.ENSEMBLE_HISTORY_PATH, "a", encoding="utf-8") as _ef:
+                        _ef.write(_json.dumps(_ens_record) + "\n")
+                except Exception:
+                    pass  # non-fatal
             except Exception as e:
                 self.logger.warning("Ensemble fetch failed, using base sigma: %s", e)
                 sigma = sigma_base
@@ -280,6 +302,23 @@ class WeatherBot:
             return []
 
         self.logger.info("Found %d total %s markets", len(markets), mc.series_ticker)
+        all_open_markets = markets
+
+        # Arbitrage/dependency scan (detection-only, never affects trading flow)
+        try:
+            from arb_scanner import scan_bucket_arbitrage, check_cross_day_dependencies
+            scan_bucket_arbitrage(
+                series_ticker=mc.series_ticker,
+                kalshi_client=self.kalshi,
+                markets=all_open_markets,
+            )
+            check_cross_day_dependencies(
+                kalshi_client=self.kalshi,
+                series_ticker=mc.series_ticker,
+                markets=all_open_markets,
+            )
+        except Exception as e:
+            self.logger.warning("Arb scanner failed (non-fatal): %s", e)
 
         # -- Step 2b: Filter to target date --
         today_str = now_et.strftime("%y") + now_et.strftime("%b").upper() + now_et.strftime("%d")
@@ -341,7 +380,7 @@ class WeatherBot:
             self.logger.info("  %-40s bid=%sc ask=%sc vol=%5d P=%.3f",
                            m.ticker, bid_str, ask_str, m.volume, p_model)
 
-        # -- Step 3b: Confidence scoring (Phase 4C) --
+        # -- Step 3b: Confidence scoring (Phase 4C) -- LOG ONLY, no blocking --
         boundaries = extract_bucket_boundaries(buckets)
         boundary_z = compute_boundary_z(mu, sigma, boundaries)
 
@@ -356,52 +395,15 @@ class WeatherBot:
             hour_et=hour_et,
         )
 
-        dynamic_min_edge = compute_dynamic_min_edge(hour_et, confidence)
-
-        # Compose boundary_risk for ensemble sigma if near boundary
-        if boundary_z is not None and boundary_z < 1.5 and config.ENSEMBLE_ENABLED:
-            boundary_risk = max(0, 1.5 - boundary_z)
-            sigma_with_boundary = ensemble.compose_sigma(
-                sigma_base=sigma,
-                boundary_risk=boundary_risk,
-            )
-            if sigma_with_boundary > sigma:
-                self.logger.info("Boundary risk sigma boost: %.2f -> %.2f (z=%.2f)",
-                                sigma, sigma_with_boundary, boundary_z)
-                sigma = sigma_with_boundary
-                self._last_sigma = sigma
-
         self._last_confidence = confidence
-        self._last_dynamic_edge = dynamic_min_edge
+        self._last_dynamic_edge = config.MIN_EDGE
 
-        self.logger.info("Confidence: %.3f | Gates: %s | Dynamic MIN_EDGE: %.1f%% | Boundary z: %s",
+        self.logger.info("Confidence: %.3f | Gates: %s | Boundary z: %s (INFO ONLY, not blocking)",
                         confidence,
                         {k: "%.2f" % v for k, v in gate_scores.items()},
-                        dynamic_min_edge * 100,
                         "%.2f" % boundary_z if boundary_z is not None else "N/A")
 
-        # Pre-dawn gate check
-        if hour_et < 6:
-            ok, reason = passes_predawn_gates(confidence, dynamic_min_edge, boundary_z)
-            if not ok:
-                self.logger.info("Pre-dawn gate BLOCKED: %s", reason)
-                self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
-                                          buckets, market_prices, [],
-                                          confidence=confidence, dynamic_edge=dynamic_min_edge,
-                                          boundary_z=boundary_z)
-                return []
-
-        # Confidence floor check
-        if confidence < config.MIN_CONFIDENCE_TO_TRADE:
-            self.logger.info("Confidence %.3f < %.3f minimum -- no trading",
-                            confidence, config.MIN_CONFIDENCE_TO_TRADE)
-            self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
-                                      buckets, market_prices, [],
-                                      confidence=confidence, dynamic_edge=dynamic_min_edge,
-                                      boundary_z=boundary_z)
-            return []
-
-        # -- Step 4: Generate Signals (with dynamic MIN_EDGE) --
+        # -- Step 4: Generate Signals (flat MIN_EDGE) --
         filtered_prices = {}
         for ticker, price in market_prices.items():
             if 0.05 <= price <= 0.95:
@@ -410,14 +412,28 @@ class WeatherBot:
                 self.logger.info("  Skipping %s: price=%.2f (near-settled)", ticker, price)
 
         signals = compute_signals(buckets, filtered_prices, mu, sigma,
-                                  min_edge=dynamic_min_edge)
+                                  min_edge=config.MIN_EDGE)
+
+        # Shadow-log NBM prediction (non-blocking, failures don't affect trading)
+        try:
+            from nbm_shadow import log_nbm_shadow
+            log_nbm_shadow(
+                target_date=target_date,
+                market_config=mc,
+                current_v2_mu=mu,
+                current_v2_sigma=sigma,
+                buckets=buckets,
+                market_prices=market_prices,
+            )
+        except Exception as e:
+            self.logger.warning("NBM shadow logging failed (non-fatal): %s", e)
 
         if not signals:
-            self.logger.info("No signals -- no edge above %.1f%% dynamic threshold",
-                            dynamic_min_edge * 100)
+            self.logger.info("No signals -- no edge above %.1f%% threshold",
+                            config.MIN_EDGE * 100)
             self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                       buckets, market_prices, [],
-                                      confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                      confidence=confidence, dynamic_edge=config.MIN_EDGE,
                                       boundary_z=boundary_z)
             return []
 
@@ -440,7 +456,7 @@ class WeatherBot:
         # Accumulate signal report section for this market
         self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                   buckets, market_prices, signals,
-                                  confidence=confidence, dynamic_edge=dynamic_min_edge,
+                                  confidence=confidence, dynamic_edge=config.MIN_EDGE,
                                   boundary_z=boundary_z)
 
         return signals
@@ -541,6 +557,63 @@ class WeatherBot:
         except Exception as e:
             self.logger.error("Failed to write signal report: %s", e)
 
+    def _build_position_detail(self, signal, contracts, fee_dollars=0.0):
+        """Build detail payload for risk correlation checks."""
+        ticker = signal.bucket.ticker
+        parts = ticker.split("-")
+        event_ticker = "%s-%s" % (parts[0], parts[1]) if len(parts) >= 2 else ticker
+        return {
+            "ticker": ticker,
+            "event_ticker": event_ticker,
+            "side": signal.side,
+            "entry_price_cents": signal.suggested_price,
+            "contracts": contracts,
+            "fee_dollars": fee_dollars,
+            "bucket": signal.bucket,
+        }
+
+    def _check_correlation_guard(self, signal, contracts, fee_dollars=0.0):
+        """
+        Evaluate same-event correlation guard.
+
+        Returns:
+            True if trade can proceed, False if blocked.
+        """
+        if self._last_mu is None or self._last_sigma is None:
+            return True
+
+        detail = self._build_position_detail(signal, contracts, fee_dollars=fee_dollars)
+        existing = self.risk.get_open_positions_for_event(detail["event_ticker"])
+        result = self.risk.check_position_correlation(
+            new_trade=detail,
+            existing_positions=existing,
+            model_mu=self._last_mu,
+            model_sigma=self._last_sigma,
+        )
+
+        action = result.get("action")
+        reason = result.get("reason", "")
+        corr = result.get("correlation")
+
+        if action == "warn":
+            if corr is not None:
+                self.logger.warning("Correlation warning (%.3f): %s", corr, reason)
+            else:
+                self.logger.warning("Correlation warning: %s", reason)
+            return True
+
+        if action == "block":
+            if self.force:
+                self.logger.warning("Correlation block overridden by --force: %s", reason)
+                return True
+            if corr is not None:
+                self.logger.info("  BLOCKED by correlation guard (%.3f): %s", corr, reason)
+            else:
+                self.logger.info("  BLOCKED by correlation guard: %s", reason)
+            return False
+
+        return True
+
     def _paper_trade(self, signals, markets=None, market_config=None):
         """Simulate trading -- log what we would do, with JSONL tracking."""
         # Build ticker -> Market lookup for bid/ask data
@@ -557,6 +630,9 @@ class WeatherBot:
             risk = (s.suggested_price / 100.0) * count
             fee = compute_fee(s.suggested_price, count, is_maker=True)
 
+            if not self._check_correlation_guard(s, count, fee_dollars=fee):
+                continue
+
             allowed, reason = self.risk.pre_trade_check(risk)
             if not allowed:
                 self.logger.info("  PAPER BLOCKED: %s", reason)
@@ -564,7 +640,11 @@ class WeatherBot:
 
             self.logger.info("  PAPER: %s %dx %s @ %dc (risk=$%.2f, fee=$%.2f)",
                            s.side, count, s.bucket.ticker, s.suggested_price, risk, fee)
-            self.risk.record_trade_open(s.bucket.ticker, risk)
+            self.risk.record_trade_open(
+                s.bucket.ticker,
+                risk,
+                position_detail=self._build_position_detail(s, count, fee_dollars=fee),
+            )
 
             # Log to structured JSONL
             if hasattr(self, 'paper_tracker'):
@@ -593,6 +673,9 @@ class WeatherBot:
 
             risk = (s.suggested_price / 100.0) * count
 
+            if not self._check_correlation_guard(s, count, fee_dollars=0.0):
+                continue
+
             # Risk check
             allowed, reason = self.risk.pre_trade_check(risk)
             if not allowed:
@@ -620,7 +703,11 @@ class WeatherBot:
                         count=count,
                         price_cents=s.suggested_price,
                     )
-                    self.risk.record_trade_open(s.bucket.ticker, risk)
+                    self.risk.record_trade_open(
+                        s.bucket.ticker,
+                        risk,
+                        position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
+                    )
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
@@ -642,24 +729,55 @@ class WeatherBot:
                         count=count,
                         price_cents=s.suggested_price,
                     )
-                    self.risk.record_trade_open(s.bucket.ticker, risk)
+                    self.risk.record_trade_open(
+                        s.bucket.ticker,
+                        risk,
+                        position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
+                    )
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
 
     def _compute_position_size(self, signal):
         """
-        How many contracts to buy, respecting risk limits.
+        Kelly Criterion position sizing.
 
-        Risk per contract = price in dollars (if buying YES)
-        Max risk per trade = $5.00
-        Min contracts = 5 (below this, fees dominate)
+        Full Kelly: f = edge / (payout_odds)
+        For binary market buying YES at price p with model_prob m:
+            edge = m - p
+            odds = (1 - p) / p  (profit per dollar risked)
+            kelly_fraction = edge / (1 - p)
+
+        We use HALF-Kelly for safety (reduces variance by 75% at cost
+        of only 25% less expected growth -- standard practice).
+
+        Caps:
+            - MAX_RISK_PER_TRADE ($5)
+            - MIN_CONTRACTS (5) -- below this, fees dominate
+            - Max 50 contracts
         """
         price_dollars = signal.suggested_price / 100.0
         if price_dollars <= 0:
             return 0
 
-        max_contracts = int(config.MAX_RISK_PER_TRADE / price_dollars)
+        # Kelly fraction of bankroll
+        if signal.side == "buy_yes":
+            payout_complement = 1.0 - signal.market_price  # profit per $1 if win
+        else:
+            payout_complement = signal.market_price  # for NO side
+
+        if payout_complement <= 0:
+            return 0
+
+        kelly_f = signal.edge / payout_complement
+        half_kelly_f = kelly_f * 0.5
+
+        # Convert fraction to dollars, then to contracts
+        kelly_dollars = half_kelly_f * config.BANKROLL
+        kelly_dollars = min(kelly_dollars, config.MAX_RISK_PER_TRADE)
+        kelly_dollars = max(kelly_dollars, 0)
+
+        max_contracts = int(kelly_dollars / price_dollars) if price_dollars > 0 else 0
         count = max(config.MIN_CONTRACTS, min(max_contracts, 50))
 
         while count * price_dollars > config.MAX_RISK_PER_TRADE and count > 0:
@@ -757,22 +875,34 @@ def main():
         default=None,
         help="Auto-exit at this MT hour (e.g. --until 16 = stop at 4 PM MT)"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Override correlation risk blocks (warnings still logged)"
+    )
     args = parser.parse_args()
 
     setup_logging("DEBUG" if args.debug else config.LOG_LEVEL)
 
     if args.mode == "reconcile":
         from paper_tracker import PaperTracker
+        from cli_scraper import reconcile_all_shadow_records
         auth = KalshiAuth(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)
         kalshi = KalshiClient(auth=auth)
         tracker = PaperTracker(kalshi_client=kalshi)
         logging.getLogger("bot").info("Running paper trade reconciliation...")
         results = tracker.reconcile_settlements()
         tracker.generate_daily_summary(date_str=args.date)
+        shadow_summary = reconcile_all_shadow_records(run_paper_reconcile=False)
+        logging.getLogger("bot").info(
+            "Shadow reconciliation: nbm_updated=%d model_cmp_updated=%d",
+            shadow_summary.get("nbm_shadow", {}).get("updated", 0),
+            shadow_summary.get("model_comparison", {}).get("updated", 0),
+        )
         logging.getLogger("bot").info("Reconciliation complete: %d trades settled", len(results))
         return
 
-    bot = WeatherBot(mode=args.mode)
+    bot = WeatherBot(mode=args.mode, force=args.force)
     bot.run_loop(once=args.once, until_hour_mt=args.until)
 
 

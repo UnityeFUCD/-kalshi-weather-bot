@@ -103,6 +103,10 @@ PAPER_TRADES_PATH = PROJECT_ROOT / "reports" / "paper_trades.jsonl"
 PAPER_PENDING_PATH = PROJECT_ROOT / "reports" / "paper_pending.json"
 PAPER_DAILY_DIR = PROJECT_ROOT / "reports" / "daily"
 PAPER_FILL_TIMEOUT_CYCLES = 15    # ~30 min at 2-min scan interval
+ENSEMBLE_HISTORY_PATH = PROJECT_ROOT / "reports" / "ensemble_history.jsonl"
+NBM_SHADOW_PATH = PROJECT_ROOT / "reports" / "nbm_shadow.jsonl"
+ARB_OPPORTUNITIES_PATH = PROJECT_ROOT / "reports" / "arb_opportunities.jsonl"
+CROSS_DAY_OBSERVATIONS_PATH = PROJECT_ROOT / "reports" / "cross_day_dependencies.jsonl"
 GHCN_PARQUET_PATH = (
     PROJECT_ROOT / "data" / "raw" / "weather" / "observations" / "USW00094728_daily.parquet"
 )

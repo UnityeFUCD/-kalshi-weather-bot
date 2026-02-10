@@ -1,0 +1,2 @@
+{"timestamp_utc": "2026-02-10T22:00:02Z", "series_ticker": "KXHIGHNY", "today_event": "KXHIGHNY-26FEB10", "tomorrow_event": "KXHIGHNY-26FEB11", "avg_midpoint_today_cents": 17.0, "avg_midpoint_tomorrow_cents": 18.75, "delta_midpoint_cents": 1.75, "type": "cross_day_observation"}
+{"timestamp_utc": "2026-02-10T22:06:55Z", "series_ticker": "KXHIGHNY", "today_event": "KXHIGHNY-26FEB10", "tomorrow_event": "KXHIGHNY-26FEB11", "avg_midpoint_today_cents": 17.083, "avg_midpoint_tomorrow_cents": 17.833, "delta_midpoint_cents": 0.75, "type": "cross_day_observation"}
