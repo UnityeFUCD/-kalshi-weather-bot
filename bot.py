@@ -201,6 +201,7 @@ class WeatherBot:
 
         if not signals:
             self.logger.info("No signals -- no edge above threshold")
+            self._write_signal_report(target_date, forecast_temp, mu, sigma, buckets, market_prices, [])
             return []
 
         self.logger.info(">>> %d signal(s) found:", len(signals))
@@ -219,7 +220,74 @@ class WeatherBot:
         # Log risk summary
         self.logger.info("Risk: %s", self.risk.summary())
 
+        # Write signals.txt report
+        self._write_signal_report(target_date, forecast_temp, mu, sigma, buckets, market_prices, signals)
+
         return signals
+
+    def _write_signal_report(self, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals):
+        """Write a plain-text signal report to signals.txt."""
+        try:
+            from datetime import datetime, timezone, timedelta
+            mt = timezone(timedelta(hours=-7))
+            now_mt = datetime.now(mt)
+
+            lines = []
+            lines.append("=" * 60)
+            lines.append("KALSHI WEATHER BOT -- SIGNAL REPORT")
+            lines.append("Generated: %s MT" % now_mt.strftime("%Y-%m-%d %I:%M %p"))
+            lines.append("Target Date: %s" % target_date)
+            lines.append("=" * 60)
+
+            lines.append("")
+            lines.append("FORECAST")
+            lines.append("  NWS Forecast High: %dF" % forecast_temp)
+            lines.append("  Model Mean (mu):   %.1fF" % mu)
+            lines.append("  Model Sigma:       %.1fF" % sigma)
+
+            lines.append("")
+            lines.append("MARKET PRICES & MODEL PROBABILITIES")
+            lines.append("  %-40s %8s %8s %8s" % ("Ticker", "Mkt Price", "Model P", "Edge"))
+            lines.append("  " + "-" * 68)
+
+            for b in buckets:
+                price = market_prices.get(b.ticker)
+                p_model = b.probability(mu, sigma)
+                if price is not None:
+                    edge = p_model - price
+                    lines.append("  %-40s %7.0fc %7.1f%% %+7.1f%%" % (
+                        b.ticker, price * 100, p_model * 100, edge * 100))
+                else:
+                    lines.append("  %-40s %8s %7.1f%%" % (b.ticker, "no price", p_model * 100))
+
+            lines.append("")
+            if signals:
+                lines.append("SIGNALS FOUND: %d" % len(signals))
+                lines.append("")
+                for s in signals:
+                    count = self._compute_position_size(s)
+                    risk = (s.suggested_price / 100.0) * count
+                    fee = compute_fee(s.suggested_price, count, is_maker=True)
+                    lines.append("  %s %s" % (s.side.upper(), s.bucket.ticker))
+                    lines.append("    Model: %.1f%%  |  Market: %.0fc  |  Edge: %+.1f%%" % (
+                        s.model_prob * 100, s.market_price * 100, s.edge * 100))
+                    lines.append("    Suggested: %dc x %d contracts  |  Risk: $%.2f  |  Fee: $%.2f" % (
+                        s.suggested_price, count, risk, fee))
+                    lines.append("")
+            else:
+                lines.append("NO SIGNALS -- no edge above %.0f%% threshold" % (config.MIN_EDGE * 100))
+
+            lines.append("")
+            lines.append("Risk: %s" % self.risk.summary())
+            lines.append("Mode: %s" % self.mode.upper())
+            lines.append("")
+
+            report = "\n".join(lines)
+            config.SIGNAL_REPORT_PATH.write_text(report, encoding="utf-8")
+            self.logger.info("Signal report written to %s", config.SIGNAL_REPORT_PATH)
+
+        except Exception as e:
+            self.logger.error("Failed to write signal report: %s", e)
 
     def _paper_trade(self, signals):
         """Simulate trading -- log what we would do."""
