@@ -70,6 +70,16 @@ class Bucket:
         
         return max(0.0, min(1.0, p))
 
+    def settles_yes(self, actual_temp):
+        """Does this bucket resolve YES given the actual temperature?"""
+        if self.bucket_type == "between":
+            return self.low <= actual_temp <= self.high
+        elif self.bucket_type == "above":
+            return actual_temp > self.low
+        elif self.bucket_type == "below":
+            return actual_temp < self.high
+        return False
+
 
 def parse_bucket_title(ticker, title):
     """

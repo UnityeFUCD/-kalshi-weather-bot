@@ -1,8 +1,10 @@
 """
 bot.py -- Kalshi Weather Trading Bot.
 
-Scans NHIGH (NYC high temperature) markets, compares NWS forecast-implied
+Scans weather high-temperature markets, compares NWS forecast-implied
 probabilities to Kalshi prices, and trades edges above threshold.
+
+Supports multiple markets via market_registry.py.
 
 Usage:
     python bot.py scan          # Scan only, no trading (safe to run anytime)
@@ -22,6 +24,7 @@ from kalshi_client import KalshiClient
 from nws import NWSClient
 from model import parse_bucket_title, compute_signals, compute_fee, Signal
 from risk import RiskManager
+from market_registry import get_enabled_markets
 import config
 
 # --- Logging Setup -----------------------------------------------------------
@@ -41,15 +44,24 @@ def setup_logging(level=config.LOG_LEVEL):
 
 class WeatherBot:
     """
-    Main trading bot for Kalshi NHIGH (NYC High Temperature) markets.
+    Main trading bot for Kalshi weather high-temperature markets.
     """
 
     def __init__(self, mode="scan"):
         self.mode = mode
         self.logger = logging.getLogger("bot")
 
-        # Initialize NWS client (no auth needed)
-        self.nws = NWSClient()
+        # Multi-market: one NWS client per enabled market
+        self._enabled_markets = get_enabled_markets()
+        self._nws_clients = {}
+        for mc in self._enabled_markets:
+            self._nws_clients[mc.series_ticker] = NWSClient(market_config=mc)
+
+        # Backward compat: self.nws points to first market's client
+        if self._enabled_markets:
+            self.nws = self._nws_clients[self._enabled_markets[0].series_ticker]
+        else:
+            self.nws = NWSClient()
 
         # ALWAYS create auth -- production requires it even for public endpoints
         auth = KalshiAuth(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)
@@ -63,20 +75,56 @@ class WeatherBot:
         self.risk = RiskManager()
         self._last_forecast_temp = None
         self._last_forecast_time = None
+        self._last_target_date = None
+        self._last_mu = None
+        self._last_sigma = None
+
+        # Paper trading tracker
+        if mode == "paper":
+            from paper_tracker import PaperTracker
+            self.paper_tracker = PaperTracker(kalshi_client=self.kalshi)
+            self.logger.info("Paper tracker initialized -- logging to %s",
+                             config.PAPER_TRADES_PATH)
+
+        # Accumulate signal report sections across markets
+        self._report_sections = []
 
     def run_cycle(self):
         """
-        Execute one scan-and-trade cycle.
-
-        1. Fetch NWS forecast for Central Park (correct date!)
-        2. Fetch NHIGH markets from Kalshi
-        3. Parse buckets and compute model probabilities
-        4. Compare to market prices
-        5. Generate signals
-        6. Execute trades (if mode allows)
+        Execute one scan-and-trade cycle across all enabled markets.
         """
         self.logger.info("-" * 50)
         self.logger.info("Cycle start -- %s", datetime.now(timezone.utc).isoformat())
+
+        # -- Paper mode: check pending fills from previous cycles --
+        if self.mode == "paper" and hasattr(self, 'paper_tracker'):
+            fills, expirations = self.paper_tracker.check_fills()
+            if fills or expirations:
+                self.logger.info("Fill check: %d filled, %d expired", fills, expirations)
+
+        # Reset report sections for this cycle
+        self._report_sections = []
+
+        all_signals = []
+        for mc in self._enabled_markets:
+            nws = self._nws_clients[mc.series_ticker]
+            signals = self._run_market_cycle(mc, nws)
+            all_signals.extend(signals)
+
+        # Write combined signals.txt report
+        self._flush_signal_report()
+
+        return all_signals
+
+    def _run_market_cycle(self, mc, nws_client):
+        """
+        Run a single scan-and-trade cycle for one market.
+
+        Args:
+            mc: MarketConfig for this market
+            nws_client: NWSClient configured for this market
+        """
+        self.logger.info("=== Market: %s (%s) ===", mc.series_ticker, mc.display_name)
 
         # -- Step 1: NWS Forecast (for the correct target date) --
         et_offset = timezone(timedelta(hours=-5))
@@ -85,48 +133,51 @@ class WeatherBot:
         if now_et.hour >= 8:
             # After 8 AM: trade tomorrow's market, need tomorrow's forecast
             target_date = (now_et + timedelta(days=1)).date()
-            forecast_temp, period_name = self.nws.get_high_forecast_for_date(target_date)
-            sigma = config.SIGMA_1DAY  # 1-day ahead = more uncertainty
+            forecast_temp, period_name = nws_client.get_high_forecast_for_date(target_date)
+            sigma = mc.sigma_1day  # 1-day ahead = more uncertainty
         else:
             # Before 8 AM: trade today's market
             target_date = now_et.date()
-            forecast_temp, period_name = self.nws.get_high_forecast_for_date(target_date)
+            forecast_temp, period_name = nws_client.get_high_forecast_for_date(target_date)
             # Same-day sigma depends on time
             if now_et.hour < 8:
-                sigma = config.SIGMA_1DAY
+                sigma = mc.sigma_1day
             elif now_et.hour < 14:
-                sigma = config.SIGMA_SAMEDAY_AM
+                sigma = mc.sigma_sameday_am
             else:
-                sigma = config.SIGMA_SAMEDAY_PM
+                sigma = mc.sigma_sameday_pm
 
         if forecast_temp is None:
             # Fallback to first daytime period
             self.logger.warning("Could not get forecast for %s -- trying fallback", target_date)
-            forecast_temp = self.nws.get_today_high_forecast()
+            forecast_temp = nws_client.get_today_high_forecast()
 
         if forecast_temp is None:
-            self.logger.error("Failed to get NWS forecast -- skipping cycle")
+            self.logger.error("Failed to get NWS forecast for %s -- skipping", mc.series_ticker)
             return []
 
         self._last_forecast_temp = forecast_temp
         self._last_forecast_time = datetime.now(timezone.utc)
+        self._last_target_date = target_date
 
-        mu = forecast_temp - config.FORECAST_BIAS
+        mu = forecast_temp - mc.forecast_bias
+        self._last_mu = mu
+        self._last_sigma = sigma
 
         self.logger.info("NWS Forecast for %s: %dF | Model: mu=%.1f, sigma=%.1f",
                         target_date, forecast_temp, mu, sigma)
 
         # -- Step 2: Fetch Markets --
         markets = self.kalshi.get_markets(
-            series_ticker=config.SERIES_TICKER,
+            series_ticker=mc.series_ticker,
             status="open"
         )
 
         if not markets:
-            self.logger.warning("No open NHIGH markets found")
+            self.logger.warning("No open %s markets found", mc.series_ticker)
             return []
 
-        self.logger.info("Found %d total NHIGH markets", len(markets))
+        self.logger.info("Found %d total %s markets", len(markets), mc.series_ticker)
 
         # -- Step 2b: Filter to target date --
         today_str = now_et.strftime("%y") + now_et.strftime("%b").upper() + now_et.strftime("%d")
@@ -201,7 +252,7 @@ class WeatherBot:
 
         if not signals:
             self.logger.info("No signals -- no edge above threshold")
-            self._write_signal_report(target_date, forecast_temp, mu, sigma, buckets, market_prices, [])
+            self._write_signal_report(mc, target_date, forecast_temp, mu, sigma, buckets, market_prices, [])
             return []
 
         self.logger.info(">>> %d signal(s) found:", len(signals))
@@ -213,31 +264,27 @@ class WeatherBot:
         if self.mode == "scan":
             self.logger.info("SCAN mode -- no trades placed")
         elif self.mode == "paper":
-            self._paper_trade(signals)
+            self._paper_trade(signals, markets, market_config=mc)
         elif self.mode == "live":
             self._live_trade(signals, markets)
 
         # Log risk summary
         self.logger.info("Risk: %s", self.risk.summary())
 
-        # Write signals.txt report
-        self._write_signal_report(target_date, forecast_temp, mu, sigma, buckets, market_prices, signals)
+        # Accumulate signal report section for this market
+        self._write_signal_report(mc, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals)
 
         return signals
 
-    def _write_signal_report(self, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals):
-        """Write a plain-text signal report to signals.txt."""
+    def _write_signal_report(self, market_config, target_date, forecast_temp, mu, sigma, buckets, market_prices, signals):
+        """Accumulate a signal report section for one market."""
         try:
-            from datetime import datetime, timezone, timedelta
-            mt = timezone(timedelta(hours=-7))
-            now_mt = datetime.now(mt)
-
             lines = []
-            lines.append("=" * 60)
-            lines.append("KALSHI WEATHER BOT -- SIGNAL REPORT")
-            lines.append("Generated: %s MT" % now_mt.strftime("%Y-%m-%d %I:%M %p"))
+            lines.append("")
+            lines.append("-" * 60)
+            lines.append("MARKET: %s (%s)" % (market_config.series_ticker, market_config.display_name))
             lines.append("Target Date: %s" % target_date)
-            lines.append("=" * 60)
+            lines.append("-" * 60)
 
             lines.append("")
             lines.append("FORECAST")
@@ -277,20 +324,47 @@ class WeatherBot:
             else:
                 lines.append("NO SIGNALS -- no edge above %.0f%% threshold" % (config.MIN_EDGE * 100))
 
-            lines.append("")
-            lines.append("Risk: %s" % self.risk.summary())
-            lines.append("Mode: %s" % self.mode.upper())
-            lines.append("")
+            self._report_sections.append("\n".join(lines))
 
-            report = "\n".join(lines)
+        except Exception as e:
+            self.logger.error("Failed to build signal report section for %s: %s",
+                              market_config.series_ticker, e)
+
+    def _flush_signal_report(self):
+        """Write the combined signal report (all markets) to signals.txt."""
+        try:
+            mt = timezone(timedelta(hours=-7))
+            now_mt = datetime.now(mt)
+
+            header = []
+            header.append("=" * 60)
+            header.append("KALSHI WEATHER BOT -- SIGNAL REPORT")
+            header.append("Generated: %s MT" % now_mt.strftime("%Y-%m-%d %I:%M %p"))
+            tickers = ", ".join(mc.series_ticker for mc in self._enabled_markets)
+            header.append("Markets: %s" % tickers)
+            header.append("=" * 60)
+
+            footer = []
+            footer.append("")
+            footer.append("Risk: %s" % self.risk.summary())
+            footer.append("Mode: %s" % self.mode.upper())
+            footer.append("")
+
+            report = "\n".join(header) + "\n" + "\n".join(self._report_sections) + "\n" + "\n".join(footer)
             config.SIGNAL_REPORT_PATH.write_text(report, encoding="utf-8")
             self.logger.info("Signal report written to %s", config.SIGNAL_REPORT_PATH)
 
         except Exception as e:
             self.logger.error("Failed to write signal report: %s", e)
 
-    def _paper_trade(self, signals):
-        """Simulate trading -- log what we would do."""
+    def _paper_trade(self, signals, markets=None, market_config=None):
+        """Simulate trading -- log what we would do, with JSONL tracking."""
+        # Build ticker -> Market lookup for bid/ask data
+        market_lookup = {}
+        if markets:
+            for m in markets:
+                market_lookup[m.ticker] = m
+
         for s in signals:
             count = self._compute_position_size(s)
             if count == 0:
@@ -307,6 +381,22 @@ class WeatherBot:
             self.logger.info("  PAPER: %s %dx %s @ %dc (risk=$%.2f, fee=$%.2f)",
                            s.side, count, s.bucket.ticker, s.suggested_price, risk, fee)
             self.risk.record_trade_open(s.bucket.ticker, risk)
+
+            # Log to structured JSONL
+            if hasattr(self, 'paper_tracker'):
+                market = market_lookup.get(s.bucket.ticker)
+                self.paper_tracker.log_paper_trade(
+                    signal=s,
+                    contracts=count,
+                    fee=fee,
+                    risk=risk,
+                    forecast_temp=self._last_forecast_temp,
+                    target_date=self._last_target_date,
+                    mu=self._last_mu,
+                    sigma=self._last_sigma,
+                    market=market,
+                    market_config=market_config,
+                )
 
     def _live_trade(self, signals, markets):
         """Execute real trades on Kalshi."""
@@ -397,7 +487,8 @@ class WeatherBot:
         """Main bot loop. Runs until interrupted."""
         self.logger.info("=" * 60)
         self.logger.info("Kalshi Weather Bot -- %s mode", self.mode.upper())
-        self.logger.info("Target: %s (NYC High Temperature)", config.SERIES_TICKER)
+        tickers = ", ".join(mc.series_ticker for mc in self._enabled_markets)
+        self.logger.info("Enabled markets: %s", tickers)
         self.logger.info("Bankroll: $%.0f", config.BANKROLL)
         self.logger.info("Min edge: %d%%", config.MIN_EDGE * 100)
         self.logger.info("=" * 60)
@@ -440,8 +531,8 @@ def main():
     parser = argparse.ArgumentParser(description="Kalshi Weather Trading Bot")
     parser.add_argument(
         "mode",
-        choices=["scan", "paper", "live"],
-        help="scan=read-only, paper=simulated trades, live=real money"
+        choices=["scan", "paper", "live", "reconcile"],
+        help="scan=read-only, paper=simulated trades, live=real money, reconcile=settle paper trades"
     )
     parser.add_argument(
         "--once",
@@ -453,9 +544,26 @@ def main():
         action="store_true",
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Date for reconcile (YYYY-MM-DD, default: today)"
+    )
     args = parser.parse_args()
 
     setup_logging("DEBUG" if args.debug else config.LOG_LEVEL)
+
+    if args.mode == "reconcile":
+        from paper_tracker import PaperTracker
+        auth = KalshiAuth(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)
+        kalshi = KalshiClient(auth=auth)
+        tracker = PaperTracker(kalshi_client=kalshi)
+        logging.getLogger("bot").info("Running paper trade reconciliation...")
+        results = tracker.reconcile_settlements()
+        tracker.generate_daily_summary(date_str=args.date)
+        logging.getLogger("bot").info("Reconciliation complete: %d trades settled", len(results))
+        return
 
     bot = WeatherBot(mode=args.mode)
     bot.run_loop(once=args.once)

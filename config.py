@@ -45,6 +45,7 @@ KALSHI_TRADE_URL = KALSHI_PROD_URL
 KALSHI_API_PATH = "/trade-api/v2"
 
 # --- Target Market: NHIGH (NYC High Temperature) ----------------------------
+# Default; see market_registry.py for multi-market configuration
 SERIES_TICKER = "KXHIGHNY"
 
 # From NHIGH.pdf rules:
@@ -59,6 +60,7 @@ SERIES_TICKER = "KXHIGHNY"
 
 # --- NWS API -----------------------------------------------------------------
 NWS_USER_AGENT = "KalshiWeatherBot (github.com/yasir)"
+# NYC defaults; per-market values in market_registry.py
 NWS_LAT = 40.7831
 NWS_LON = -73.9712
 NWS_GRID_OFFICE = "OKX"
@@ -66,11 +68,10 @@ NWS_GRID_X = 33
 NWS_GRID_Y = 37
 
 # --- Pricing Model -----------------------------------------------------------
-SIGMA_1DAY = 2.5       # 1-day ahead forecast error
-SIGMA_SAMEDAY_AM = 1.5 # Same-day morning
-SIGMA_SAMEDAY_PM = 0.8 # Same-day afternoon
-
-FORECAST_BIAS = 0.0    # Start at 0, update from calibration data
+SIGMA_1DAY       = 1.2
+SIGMA_SAMEDAY_AM = 0.9    # σ_1day × 0.71 (√t scaling)
+SIGMA_SAMEDAY_PM = 0.5    # σ_1day × 0.41 (√t scaling)
+FORECAST_BIAS    = 0.0    # Keep — bias is negligible   
 
 # --- Trading Thresholds ------------------------------------------------------
 MIN_EDGE = 0.08          # 8% minimum edge over market price
@@ -96,6 +97,15 @@ SCAN_INTERVAL_SECONDS = 120
 ORDER_TIMEOUT_SECONDS = 600
 MAX_CANCELS_PER_MINUTE = 3
 USE_MAKER_ORDERS_ONLY = True
+
+# --- Paper Trading -----------------------------------------------------------
+PAPER_TRADES_PATH = PROJECT_ROOT / "reports" / "paper_trades.jsonl"
+PAPER_PENDING_PATH = PROJECT_ROOT / "reports" / "paper_pending.json"
+PAPER_DAILY_DIR = PROJECT_ROOT / "reports" / "daily"
+PAPER_FILL_TIMEOUT_CYCLES = 15    # ~30 min at 2-min scan interval
+GHCN_PARQUET_PATH = (
+    PROJECT_ROOT / "data" / "raw" / "weather" / "observations" / "USW00094728_daily.parquet"
+)
 
 # --- Logging -----------------------------------------------------------------
 LOG_FILE = LOGS_DIR / "bot.log"

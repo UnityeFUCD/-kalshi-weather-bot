@@ -23,18 +23,35 @@ logger = logging.getLogger(__name__)
 
 class NWSClient:
     """
-    NWS API client for Central Park, NY temperature data.
+    NWS API client for temperature data.
+
+    When constructed with a MarketConfig the client uses that market's
+    grid coordinates, station, and archive directories.  Without one it
+    falls back to the config.py globals (backward compat for backtest
+    scripts and the self-test block at the bottom of this file).
     """
 
-    def __init__(self):
+    def __init__(self, market_config=None):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": config.NWS_USER_AGENT,
             "Accept": "application/geo+json",
         })
-        self.grid_office = config.NWS_GRID_OFFICE
-        self.grid_x = config.NWS_GRID_X
-        self.grid_y = config.NWS_GRID_Y
+
+        if market_config is not None:
+            self.grid_office = market_config.nws_grid_office
+            self.grid_x = market_config.nws_grid_x
+            self.grid_y = market_config.nws_grid_y
+            self._station = market_config.nws_station
+            self._forecast_snapshots_dir = market_config.forecast_snapshots_dir
+            self._observations_dir = market_config.observations_dir
+        else:
+            self.grid_office = config.NWS_GRID_OFFICE
+            self.grid_x = config.NWS_GRID_X
+            self.grid_y = config.NWS_GRID_Y
+            self._station = "KNYC"
+            self._forecast_snapshots_dir = config.FORECAST_SNAPSHOTS_DIR
+            self._observations_dir = config.OBSERVATIONS_DIR
 
     def get_forecast(self):
         """
@@ -67,8 +84,10 @@ class NWSClient:
             logger.error("NWS hourly forecast failed: %s", e)
             return None
 
-    def get_latest_observation(self, station="KNYC"):
+    def get_latest_observation(self, station=None):
         """Get latest observation from a specific station."""
+        if station is None:
+            station = self._station
         url = "https://api.weather.gov/stations/%s/observations/latest" % station
         try:
             resp = self.session.get(url, timeout=15)
@@ -155,8 +174,8 @@ class NWSClient:
         return None, None
 
     def get_current_temp(self):
-        """Get current observed temperature (F) from Central Park station."""
-        obs = self.get_latest_observation("KNYC")
+        """Get current observed temperature (F) from the configured station."""
+        obs = self.get_latest_observation(self._station)
         if not obs:
             return None
 
@@ -173,8 +192,8 @@ class NWSClient:
         now = datetime.now(timezone.utc)
         ts = now.strftime("%Y%m%d_%H%M%S")
 
-        out_dir = config.FORECAST_SNAPSHOTS_DIR if "forecast" in data_type \
-            else config.OBSERVATIONS_DIR
+        out_dir = self._forecast_snapshots_dir if "forecast" in data_type \
+            else self._observations_dir
         out_dir.mkdir(parents=True, exist_ok=True)
 
         filename = "%s_%s.json" % (data_type, ts)

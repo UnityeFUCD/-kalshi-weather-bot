@@ -11,9 +11,9 @@ REM To set up in Task Scheduler:
 REM   1. Create Basic Task -> "Kalshi Morning Trade"
 REM   2. Trigger: Daily at 5:30 AM
 REM   3. Action: Start a Program
-REM   4. Program: C:\Users\Unitye\Desktop\kalshi-weather-bot\morning_trade.bat
+REM   4. Program: C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot\morning_trade.bat
 
-cd /d C:\Users\Unitye\Desktop\kalshi-weather-bot
+cd /d C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot
 
 echo ================================================== >> logs\scheduler.log
 echo [%date% %time%] LIVE TRADE starting... >> logs\scheduler.log
