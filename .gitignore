@@ -1,0 +1,8 @@
+keys/
+data/
+logs/
+*.pem
+*.key
+.env
+__pycache__/
+*.pyc
