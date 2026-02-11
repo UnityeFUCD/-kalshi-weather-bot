@@ -177,8 +177,7 @@ if __name__ == "__main__":
     # NYC Central Park coordinates
     ens = EnsembleForecaster(lat=40.7831, lon=-73.9712)
 
-    et_offset = timezone(timedelta(hours=-5))
-    now_et = datetime.now(et_offset)
+    now_et = datetime.now(config.MARKET_TZ)
     tomorrow = (now_et + timedelta(days=1)).date()
 
     print("\nTarget date: %s" % tomorrow)

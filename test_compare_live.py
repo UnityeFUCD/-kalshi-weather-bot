@@ -86,8 +86,7 @@ def run_live_comparison():
     ensemble = EnsembleForecaster(lat=40.7831, lon=-73.9712)
 
     # Determine target date
-    et_offset = timezone(timedelta(hours=-5))
-    now_et = datetime.now(et_offset)
+    now_et = datetime.now(config.MARKET_TZ)
     hour_et = now_et.hour
 
     if hour_et >= 8:
