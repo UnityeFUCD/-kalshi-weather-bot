@@ -75,7 +75,7 @@ SIGMA_SAMEDAY_PM = 0.5    # σ_1day × 0.41 (√t scaling)
 FORECAST_BIAS    = 0.0    # Keep — bias is negligible   
 
 # --- Trading Thresholds ------------------------------------------------------
-MIN_EDGE = 0.15          # 15% entry edge threshold
+MIN_EDGE = 0.08          # 8% floor -- dynamic scaling handles time-of-day adjustment
 EXIT_EDGE = 0.45         # 45% target edge for exits/reductions
 MIN_CONTRACTS = 5        # Below this, fees dominate
 MAX_RISK_PER_TRADE = 2.0 # $2.00 max risk per trade

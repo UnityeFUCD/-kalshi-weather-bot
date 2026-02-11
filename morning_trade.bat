@@ -14,6 +14,7 @@ REM   3. Action: Start a Program
 REM   4. Program: C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot\morning_trade.bat
 
 cd /d C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot
+set KALSHI_API_KEY_ID=37f5c54f-05a2-4e71-aae3-e0f426de5c98
 
 echo ================================================== >> logs\scheduler.log
 echo [%date% %time%] LIVE TRADE starting... >> logs\scheduler.log

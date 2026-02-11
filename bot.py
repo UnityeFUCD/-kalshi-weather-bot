@@ -240,13 +240,16 @@ class WeatherBot:
 
         if obs_temp is not None:
             self.logger.info("METAR obs: %.1fF from %s", obs_temp, obs_source)
-            # Only apply nudge and compute residual for same-day trading
-            if target_date == now_et.date():
+            # Only apply nudge for same-day trading AND after morning warmup
+            # Pre-10AM: overnight temps don't inform daily high, skip residual nudge
+            if target_date == now_et.date() and hour_et >= 10:
                 mu_before = mu
                 mu = metar_obs.compute_mu_nudge(mu)
                 if abs(mu - mu_before) > 0.01:
                     self.logger.info("Observation nudge: mu %.1f -> %.1f", mu_before, mu)
                 _, residual_ewma = metar_obs.compute_residual(mu)
+            elif target_date == now_et.date():
+                self.logger.info("Pre-10AM: skipping obs nudge (overnight temps not informative)")
             else:
                 # Next-day: obs don't inform forecast, skip residual for confidence
                 self.logger.info("Next-day trade: skipping obs residual for confidence")

@@ -17,6 +17,7 @@ REM
 REM ~300 scans per day (10.5 hours x ~30 scans/hour)
 
 cd /d "C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot"
+set KALSHI_API_KEY_ID=37f5c54f-05a2-4e71-aae3-e0f426de5c98
 
 echo [%date% %time%] Paper loop starting... >> logs\paper_loop.log
 

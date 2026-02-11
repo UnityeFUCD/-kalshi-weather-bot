@@ -20,6 +20,7 @@ REM This runs: scan + GHCN refresh + calibration builder.
 REM Safe to run manually anytime -- idempotent.
 
 cd /d C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot
+set KALSHI_API_KEY_ID=37f5c54f-05a2-4e71-aae3-e0f426de5c98
 
 echo [%date% %time%] Daily runner starting... >> logs\daily_runner_scheduler.log
 

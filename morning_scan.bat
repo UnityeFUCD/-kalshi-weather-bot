@@ -15,6 +15,7 @@ REM This does a SCAN ONLY (no trades). Check signals.txt to see what it found.
 REM When you're ready for auto-trading, use morning_trade.bat instead.
 
 cd /d C:\Users\fycin\Desktop\kelshi-weather-bot\-kalshi-weather-bot
+set KALSHI_API_KEY_ID=37f5c54f-05a2-4e71-aae3-e0f426de5c98
 
 echo [%date% %time%] Morning scan starting... >> logs\scheduler.log
 
