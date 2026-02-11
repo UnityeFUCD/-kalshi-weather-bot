@@ -92,10 +92,17 @@ class WeatherBot:
             self.nws = NWSClient()
 
         # ALWAYS create auth -- production requires it even for public endpoints
+        if not config.KALSHI_API_KEY_ID:
+            raise RuntimeError("KALSHI_API_KEY_ID is required via environment variable.")
+
         auth = KalshiAuth(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)
         self.kalshi = KalshiClient(auth=auth)
 
         if mode == "live":
+            if not config.LIVE_TRADING:
+                raise RuntimeError(
+                    "Live trading blocked. Set LIVE_TRADING=true to enable real order placement."
+                )
             self.logger.info("LIVE MODE -- real money at risk")
         else:
             self.logger.info("Mode: %s", mode)
@@ -175,8 +182,7 @@ class WeatherBot:
         ensemble = self._ensemble_forecasters[mc.series_ticker]
 
         # -- Step 1: Determine target date and base sigma --
-        et_offset = timezone(timedelta(hours=-5))
-        now_et = datetime.now(et_offset)
+        now_et = datetime.now(config.MARKET_TZ)
         hour_et = now_et.hour
 
         if hour_et >= 8:
@@ -529,8 +535,7 @@ class WeatherBot:
     def _flush_signal_report(self):
         """Write the combined signal report (all markets) to signals.txt."""
         try:
-            mt = timezone(timedelta(hours=-7))
-            now_mt = datetime.now(mt)
+            now_mt = datetime.now(config.OWNER_TZ)
 
             header = []
             header.append("=" * 60)
@@ -622,7 +627,11 @@ class WeatherBot:
             for m in markets:
                 market_lookup[m.ticker] = m
 
+        trades_executed = 0
         for s in signals:
+            if trades_executed >= config.MAX_TRADES_PER_RUN:
+                self.logger.info("Reached MAX_TRADES_PER_RUN=%d", config.MAX_TRADES_PER_RUN)
+                break
             count = self._compute_position_size(s)
             if count == 0:
                 continue
@@ -645,6 +654,7 @@ class WeatherBot:
                 risk,
                 position_detail=self._build_position_detail(s, count, fee_dollars=fee),
             )
+            trades_executed += 1
 
             # Log to structured JSONL
             if hasattr(self, 'paper_tracker'):
@@ -664,7 +674,11 @@ class WeatherBot:
 
     def _live_trade(self, signals, markets):
         """Execute real trades on Kalshi."""
+        trades_executed = 0
         for s in signals:
+            if trades_executed >= config.MAX_TRADES_PER_RUN:
+                self.logger.info("Reached MAX_TRADES_PER_RUN=%d", config.MAX_TRADES_PER_RUN)
+                break
             count = self._compute_position_size(s)
             if count < config.MIN_CONTRACTS:
                 self.logger.info("  Skip %s: count=%d < min=%d",
@@ -708,6 +722,7 @@ class WeatherBot:
                         risk,
                         position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
                     )
+                    trades_executed += 1
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
@@ -734,6 +749,7 @@ class WeatherBot:
                         risk,
                         position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
                     )
+                    trades_executed += 1
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
@@ -815,8 +831,7 @@ class WeatherBot:
         while True:
             # Market hours check
             if until_hour_mt is not None:
-                mt = timezone(timedelta(hours=-7))
-                now_mt = datetime.now(mt)
+                now_mt = datetime.now(config.OWNER_TZ)
                 if now_mt.hour >= until_hour_mt:
                     self.logger.info("Past %d:00 MT -- auto-exiting market window", until_hour_mt)
                     break

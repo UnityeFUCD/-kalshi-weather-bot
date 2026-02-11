@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import config
@@ -63,7 +63,7 @@ class RiskManager:
         self.open_positions_detail: list[dict[str, Any]] = []
 
     def _today_str(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(config.MARKET_TZ).strftime("%Y-%m-%d")
 
     def _check_new_day(self):
         """Reset daily stats if new day."""
