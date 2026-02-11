@@ -5,8 +5,8 @@ Automated trading bot for **NHIGH** (NYC High Temperature) markets on Kalshi.
 ## Reality Check
 
 From your market data scrape: **NYC high temp is the ONLY weather market with
-any liquidity** (~$400/day). Everything else — Denver, Chicago, LA, rain, snow,
-low temps — shows $0 volume and empty order books. This bot focuses exclusively
+any liquidity** (~$400/day). Everything else - Denver, Chicago, LA, rain, snow,
+low temps - shows $0 volume and empty order books. This bot focuses exclusively
 on NHIGH.
 
 ## Architecture
@@ -46,37 +46,40 @@ NWS Forecast API                    Kalshi API
 | `risk.py` | Position limits, daily loss tracking, kill switch |
 | `bot.py` | Main loop tying everything together |
 
+> Live safety: `bot.py live` requires environment variable `LIVE_TRADING=true`.
+
 ## Quick Start
 
 ```bash
 # 1. Install dependencies
-pip install requests cryptography
+py -m pip install requests cryptography
 
-# 2. Test auth (generates a signature — doesn't hit the API)
+# 2. Test auth (generates a signature - doesn't hit the API)
 cd kalshi-weather-bot
-python kalshi_auth.py
+py kalshi_auth.py
 
 # 3. Test the pricing model (no API calls)
-python model.py
+py model.py
 
 # 4. Test Kalshi connectivity (public endpoint, no auth)
-python kalshi_client.py
+py kalshi_client.py
 
 # 5. Test NWS forecast fetch
-python nws.py
+py nws.py
 
 # 6. Run one scan cycle (read-only, no trades)
-python bot.py scan --once
+py bot.py scan --once
 
 # 7. Run paper trading (logs what it would trade)
-python bot.py paper --once
+py bot.py paper --once
 
 # 8. Run continuous paper trading
-python bot.py paper
+py bot.py paper
 
-# 9. GO LIVE (real money — only after paper trading validates)
-python bot.py live --once    # single cycle
-python bot.py live           # continuous
+# 9. GO LIVE (real money - only after paper trading validates)
+$env:LIVE_TRADING="true"
+py bot.py live --once    # single cycle
+py bot.py live           # continuous
 ```
 
 ## NHIGH Contract Rules (from your PDF)
@@ -97,7 +100,7 @@ python bot.py live           # continuous
 2. Model observed temp as: `T ~ Normal(forecast - bias, σ_error)`
 3. For each bucket, compute P(bucket) using normal CDF
 4. Compare to Kalshi market prices
-5. Trade when `model_prob - market_price > 8%` (after fees)
+5. Trade when `model_prob - market_price > dynamic MIN_EDGE` (base config entry is 15%, scaled by confidence/time)
 6. Always use **limit orders** (maker fees 4x cheaper than taker)
 7. Hold to settlement (round-tripping doubles costs)
 
@@ -105,22 +108,23 @@ python bot.py live           # continuous
 
 | Parameter | Value |
 |-----------|-------|
-| Max risk per trade | $5.00 (5% of $100 bankroll) |
-| Max daily exposure | $20.00 |
-| Max open positions | 4 |
-| Daily loss halt | $10.00 |
-| Weekly loss halt | $20.00 |
+| Max risk per trade | $2.00 |
+| Max daily exposure | $10.00 |
+| Max open positions | 3 |
+| Daily loss halt | $8.00 |
+| Weekly loss halt | $15.00 |
+| Max trades per run | 5 |
 | Min contracts/trade | 5 |
-| Min edge to trade | 8% |
+| Min edge to trade | Dynamic (base 15%) |
 
 ## Milestone Checklist
 
-- [ ] `python kalshi_auth.py` — prints signature without error
-- [ ] `python kalshi_client.py` — shows real NHIGH markets and prices
-- [ ] `python nws.py` — shows today's NYC forecast
-- [ ] `python model.py` — shows probability distribution
-- [ ] `python bot.py scan --once` — full cycle, no trades
-- [ ] `python bot.py paper` — run 3+ days, review logs
+- [ ] `py kalshi_auth.py` - prints signature without error
+- [ ] `py kalshi_client.py` - shows real NHIGH markets and prices
+- [ ] `py nws.py` - shows today's NYC forecast
+- [ ] `py model.py` - shows probability distribution
+- [ ] `py bot.py scan --once` - full cycle, no trades
+- [ ] `py bot.py paper` - run 3+ days, review logs
 - [ ] Win rate > 55% in paper trading?
-- [ ] `python bot.py live --once` — first real trade
+- [ ] `$env:LIVE_TRADING="true"; py bot.py live --once` - first real trade
 - [ ] Monitor settlement next morning
