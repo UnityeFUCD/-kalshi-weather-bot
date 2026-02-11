@@ -186,6 +186,7 @@ class Signal:
     edge: float            # model_prob - market_price (positive = underpriced)
     side: str              # "buy_yes" or "buy_no"
     suggested_price: int   # Price in cents for limit order
+    ev_per_contract: float = 0.0  # EV after fees per contract in dollars
 
 
 def compute_signals(buckets, market_prices, mu, sigma, min_edge=None):
@@ -224,6 +225,10 @@ def compute_signals(buckets, market_prices, mu, sigma, min_edge=None):
         
         if yes_edge > min_edge:
             suggested = max(1, int(price * 100) - 1)
+            # EV per contract = P_model × $1.00 - entry_price - fee - slippage
+            fee_per = compute_fee(suggested, 1, is_maker=True)
+            slippage = 0.01
+            ev = prob * 1.00 - (suggested / 100.0) - fee_per - slippage
             signals.append(Signal(
                 bucket=bucket,
                 model_prob=prob,
@@ -231,10 +236,15 @@ def compute_signals(buckets, market_prices, mu, sigma, min_edge=None):
                 edge=yes_edge,
                 side="buy_yes",
                 suggested_price=suggested,
+                ev_per_contract=ev,
             ))
         elif no_edge > min_edge:
             no_price = 1.0 - price
+            no_prob = 1.0 - prob
             suggested = max(1, int(no_price * 100) - 1)
+            fee_per = compute_fee(suggested, 1, is_maker=True)
+            slippage = 0.01
+            ev = no_prob * 1.00 - (suggested / 100.0) - fee_per - slippage
             signals.append(Signal(
                 bucket=bucket,
                 model_prob=prob,
@@ -242,14 +252,18 @@ def compute_signals(buckets, market_prices, mu, sigma, min_edge=None):
                 edge=no_edge,
                 side="buy_no",
                 suggested_price=suggested,
+                ev_per_contract=ev,
             ))
     
     # Sanity check: probabilities should sum to ~1.0
     if abs(prob_sum - 1.0) > 0.05:
         logger.warning("Bucket probabilities sum to %.3f (expected ~1.0)", prob_sum)
     
-    signals.sort(key=lambda s: s.edge, reverse=True)
-    
+    # Filter out negative EV signals
+    signals = [s for s in signals if s.ev_per_contract > 0]
+
+    signals.sort(key=lambda s: s.ev_per_contract, reverse=True)
+
     return signals
 
 

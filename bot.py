@@ -250,6 +250,7 @@ class WeatherBot:
         # -- Step 1d: Ensemble σ (Phase 5) --
         # Simple: σ = max(σ_base, α × σ_ensemble). No stacking.
         sigma = sigma_base
+        _ens_mean = None
         if config.ENSEMBLE_ENABLED:
             try:
                 sigma_ens, n_members, _ = ensemble.get_ensemble_sigma(target_date)
@@ -262,6 +263,21 @@ class WeatherBot:
                     self.logger.info("Ensemble sigma: base=%.2f -> composed=%.2f "
                                     "(ens=%.2f, %d members)",
                                     sigma_base, sigma, sigma_ens or 0, n_members)
+
+                # Check ensemble mean vs NWS forecast divergence
+                ens_mean = ensemble.get_ensemble_mean(target_date)
+                _ens_mean = ens_mean
+                if ens_mean is not None and forecast_temp is not None:
+                    ens_nws_gap = abs(ens_mean - forecast_temp)
+                    if ens_nws_gap > 3.0:
+                        self.logger.warning(
+                            "LARGE DIVERGENCE: Ensemble mean=%.1fF vs NWS=%dF (gap=%.1fF) "
+                            "-- ensemble may use different grid point than settlement station",
+                            ens_mean, forecast_temp, ens_nws_gap)
+                    elif ens_nws_gap > 2.0:
+                        self.logger.info(
+                            "Ensemble-NWS gap: mean=%.1fF vs NWS=%dF (%.1fF)",
+                            ens_mean, forecast_temp, ens_nws_gap)
 
                 # Log ensemble σ history for future backtesting
                 try:
@@ -347,9 +363,29 @@ class WeatherBot:
 
         markets = tradeable
 
+        # -- Step 2c: Time-to-settlement guard --
+        hours_to_settlement = None
+        if target_date == now_et.date():
+            # Same-day: settlement is ~midnight local, but markets close earlier
+            settlement_approx = datetime(now_et.year, now_et.month, now_et.day,
+                                         23, 59, tzinfo=et_offset)
+            hours_to_settlement = (settlement_approx - now_et).total_seconds() / 3600.0
+        else:
+            # Next-day: at least 24+ hours away
+            settlement_approx = datetime(target_date.year, target_date.month,
+                                         target_date.day, 23, 59, tzinfo=et_offset)
+            hours_to_settlement = (settlement_approx - now_et).total_seconds() / 3600.0
+
+        if hours_to_settlement is not None and hours_to_settlement < config.NO_TRADE_WITHIN_HOURS_OF_SETTLEMENT:
+            self.logger.warning("Only %.1f hours to settlement (min=%d) -- skipping %s",
+                               hours_to_settlement, config.NO_TRADE_WITHIN_HOURS_OF_SETTLEMENT,
+                               mc.series_ticker)
+            return []
+
         # -- Step 3: Parse Buckets --
         buckets = []
         market_prices = {}
+        market_data = {}  # ticker -> Market object for liquidity checks
 
         for m in markets:
             bucket = parse_bucket_title(m.ticker, m.title)
@@ -357,7 +393,20 @@ class WeatherBot:
                 self.logger.warning("Skipping unparseable: %s '%s'", m.ticker, m.title)
                 continue
 
+            # Liquidity filter: spread
+            if m.spread_cents is not None and m.spread_cents > config.MAX_SPREAD * 100:
+                self.logger.info("  Skipping %s: spread=%dc > max=%dc",
+                               m.ticker, m.spread_cents, int(config.MAX_SPREAD * 100))
+                continue
+
+            # Liquidity filter: 24h volume
+            if m.volume_24h < config.MIN_VOLUME_24H:
+                self.logger.info("  Skipping %s: vol_24h=%d < min=%d",
+                               m.ticker, m.volume_24h, config.MIN_VOLUME_24H)
+                continue
+
             buckets.append(bucket)
+            market_data[m.ticker] = m
 
             # Use midpoint as market price, or yes_ask if no bid
             if m.yes_bid is not None and m.yes_ask is not None:
@@ -376,9 +425,10 @@ class WeatherBot:
 
             bid_str = "%3d" % m.yes_bid if m.yes_bid is not None else " --"
             ask_str = "%3d" % m.yes_ask if m.yes_ask is not None else " --"
+            spread_str = "%2d" % m.spread_cents if m.spread_cents is not None else "--"
             p_model = bucket.probability(mu, sigma)
-            self.logger.info("  %-40s bid=%sc ask=%sc vol=%5d P=%.3f",
-                           m.ticker, bid_str, ask_str, m.volume, p_model)
+            self.logger.info("  %-40s bid=%sc ask=%sc spread=%sc vol=%5d P=%.3f",
+                           m.ticker, bid_str, ask_str, spread_str, m.volume, p_model)
 
         # -- Step 3b: Confidence scoring (Phase 4C) -- LOG ONLY, no blocking --
         boundaries = extract_bucket_boundaries(buckets)
@@ -434,13 +484,15 @@ class WeatherBot:
             self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                       buckets, market_prices, [],
                                       confidence=confidence, dynamic_edge=config.MIN_EDGE,
-                                      boundary_z=boundary_z)
+                                      boundary_z=boundary_z,
+                                      ensemble_mean=_ens_mean)
             return []
 
         self.logger.info(">>> %d signal(s) found:", len(signals))
         for s in signals:
-            self.logger.info("  %s %s: edge=%+.3f (model=%.3f vs mkt=%.2f)",
-                           s.side, s.bucket.ticker, s.edge, s.model_prob, s.market_price)
+            self.logger.info("  %s %s: edge=%+.3f ev=$%+.3f (model=%.3f vs mkt=%.2f)",
+                           s.side, s.bucket.ticker, s.edge, s.ev_per_contract,
+                           s.model_prob, s.market_price)
 
         # -- Step 5: Execute --
         if self.mode == "scan":
@@ -457,13 +509,15 @@ class WeatherBot:
         self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                   buckets, market_prices, signals,
                                   confidence=confidence, dynamic_edge=config.MIN_EDGE,
-                                  boundary_z=boundary_z)
+                                  boundary_z=boundary_z,
+                                  ensemble_mean=_ens_mean)
 
         return signals
 
     def _write_signal_report(self, market_config, target_date, forecast_temp,
                               mu, sigma, buckets, market_prices, signals,
-                              confidence=None, dynamic_edge=None, boundary_z=None):
+                              confidence=None, dynamic_edge=None, boundary_z=None,
+                              ensemble_mean=None):
         """Accumulate a signal report section for one market."""
         try:
             lines = []
@@ -478,6 +532,12 @@ class WeatherBot:
             lines.append("  NWS Forecast High: %dF" % forecast_temp)
             lines.append("  Model Mean (mu):   %.1fF" % mu)
             lines.append("  Model Sigma:       %.2fF" % sigma)
+            if ensemble_mean is not None:
+                ens_gap = abs(ensemble_mean - forecast_temp)
+                lines.append("  Ensemble Mean:     %.1fF" % ensemble_mean)
+                if ens_gap > 3.0:
+                    lines.append("  *** WARNING: Ensemble-NWS gap = %.1fF ***" % ens_gap)
+                    lines.append("  *** Ensemble may use different grid point than settlement station ***")
 
             if confidence is not None:
                 lines.append("")
@@ -504,17 +564,30 @@ class WeatherBot:
 
             lines.append("")
             if signals:
-                lines.append("SIGNALS FOUND: %d" % len(signals))
+                lines.append("TRADE RECOMMENDATIONS: %d signal(s)" % len(signals))
                 lines.append("")
                 for s in signals:
                     count = self._compute_position_size(s)
                     risk = (s.suggested_price / 100.0) * count
                     fee = compute_fee(s.suggested_price, count, is_maker=True)
-                    lines.append("  %s %s" % (s.side.upper(), s.bucket.ticker))
+                    total_ev = s.ev_per_contract * count
+
+                    # GO/NO-GO decision
+                    go = total_ev > 0.10 and count >= config.MIN_CONTRACTS
+                    status = "GO" if go else "CAUTION"
+
+                    lines.append("  [%s] %s %s" % (status, s.side.upper(), s.bucket.ticker))
                     lines.append("    Model: %.1f%%  |  Market: %.0fc  |  Edge: %+.1f%%" % (
                         s.model_prob * 100, s.market_price * 100, s.edge * 100))
+                    lines.append("    EV/contract: $%+.3f  |  Total EV: $%+.2f" % (
+                        s.ev_per_contract, total_ev))
                     lines.append("    Suggested: %dc x %d contracts  |  Risk: $%.2f  |  Fee: $%.2f" % (
                         s.suggested_price, count, risk, fee))
+                    if not go:
+                        if total_ev <= 0.10:
+                            lines.append("    ! EV too low after fees")
+                        if count < config.MIN_CONTRACTS:
+                            lines.append("    ! Below minimum contract size")
                     lines.append("")
             else:
                 edge_pct = dynamic_edge * 100 if dynamic_edge else config.MIN_EDGE * 100

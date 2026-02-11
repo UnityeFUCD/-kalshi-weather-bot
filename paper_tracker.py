@@ -142,6 +142,7 @@ class PaperTracker:
             "edge": round(signal.edge, 4),
             "edge_vs_bid": round(edge_vs_bid, 4) if edge_vs_bid is not None else None,
             "edge_vs_ask": round(edge_vs_ask, 4) if edge_vs_ask is not None else None,
+            "ev_per_contract": round(signal.ev_per_contract, 4),
             "suggested_price": signal.suggested_price,
             "contracts": contracts,
             "estimated_fee": round(fee, 4),
