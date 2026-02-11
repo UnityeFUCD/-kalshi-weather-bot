@@ -386,7 +386,7 @@ class WeatherBot:
             self.logger.info("  %-40s bid=%sc ask=%sc vol=%5d P=%.3f",
                            m.ticker, bid_str, ask_str, m.volume, p_model)
 
-        # -- Step 3b: Confidence scoring (Phase 4C) -- LOG ONLY, no blocking --
+        # -- Step 3b: Confidence scoring (Phase 4C) --
         boundaries = extract_bucket_boundaries(buckets)
         boundary_z = compute_boundary_z(mu, sigma, boundaries)
 
@@ -401,15 +401,17 @@ class WeatherBot:
             hour_et=hour_et,
         )
 
+        dynamic_edge = compute_dynamic_min_edge(hour_et, confidence)
         self._last_confidence = confidence
-        self._last_dynamic_edge = config.MIN_EDGE
+        self._last_dynamic_edge = dynamic_edge
 
-        self.logger.info("Confidence: %.3f | Gates: %s | Boundary z: %s (INFO ONLY, not blocking)",
+        self.logger.info("Confidence: %.3f | Gates: %s | Boundary z: %s | MIN_EDGE=%.1f%%",
                         confidence,
                         {k: "%.2f" % v for k, v in gate_scores.items()},
-                        "%.2f" % boundary_z if boundary_z is not None else "N/A")
+                        "%.2f" % boundary_z if boundary_z is not None else "N/A",
+                        dynamic_edge * 100)
 
-        # -- Step 4: Generate Signals (flat MIN_EDGE) --
+        # -- Step 4: Generate Signals (dynamic MIN_EDGE) --
         filtered_prices = {}
         for ticker, price in market_prices.items():
             if 0.05 <= price <= 0.95:
@@ -418,7 +420,13 @@ class WeatherBot:
                 self.logger.info("  Skipping %s: price=%.2f (near-settled)", ticker, price)
 
         signals = compute_signals(buckets, filtered_prices, mu, sigma,
-                                  min_edge=config.MIN_EDGE)
+                                  min_edge=dynamic_edge)
+
+        if hour_et < 6:
+            predawn_ok, predawn_reason = passes_predawn_gates(confidence, dynamic_edge, boundary_z)
+            if not predawn_ok:
+                self.logger.info("Predawn gate blocked trading: %s", predawn_reason)
+                signals = []
 
         # Shadow-log NBM prediction (non-blocking, failures don't affect trading)
         try:
@@ -436,10 +444,10 @@ class WeatherBot:
 
         if not signals:
             self.logger.info("No signals -- no edge above %.1f%% threshold",
-                            config.MIN_EDGE * 100)
+                            dynamic_edge * 100)
             self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                       buckets, market_prices, [],
-                                      confidence=confidence, dynamic_edge=config.MIN_EDGE,
+                                      confidence=confidence, dynamic_edge=dynamic_edge,
                                       boundary_z=boundary_z)
             return []
 
@@ -462,7 +470,7 @@ class WeatherBot:
         # Accumulate signal report section for this market
         self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                   buckets, market_prices, signals,
-                                  confidence=confidence, dynamic_edge=config.MIN_EDGE,
+                                  confidence=confidence, dynamic_edge=dynamic_edge,
                                   boundary_z=boundary_z)
 
         return signals
