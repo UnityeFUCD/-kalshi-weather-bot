@@ -18,7 +18,6 @@ the final σ using multiple uncertainty sources:
 
 import logging
 import statistics
-import math
 from datetime import datetime, timezone, timedelta
 
 import requests
