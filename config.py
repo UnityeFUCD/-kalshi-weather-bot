@@ -7,6 +7,7 @@ with meaningful liquidity on Kalshi (~$400+/day volume).
 
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # --- Paths -------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).parent
@@ -21,16 +22,16 @@ OBSERVATIONS_DIR = DATA_DIR / "observations"
 SIGNAL_REPORT_PATH = PROJECT_ROOT / "signals.txt"
 
 # --- Owner Location ----------------------------------------------------------
-# Aurora, CO 80013 -- Mountain Time (UTC-7 standard, UTC-6 DST)
+# Aurora, CO 80013 -- Mountain Time
 OWNER_TIMEZONE = "America/Denver"
+OWNER_TZ = ZoneInfo(OWNER_TIMEZONE)
+MARKET_TIMEZONE = "America/New_York"
+MARKET_TZ = ZoneInfo(MARKET_TIMEZONE)
 # Note: Bot trades NYC weather, but owner is in Mountain Time
 # All user-facing times are shown in MT, all market logic uses ET
 
 # --- Kalshi API (PRODUCTION) -------------------------------------------------
-KALSHI_API_KEY_ID = os.environ.get(
-    "KALSHI_API_KEY_ID",
-    "37f5c54f-05a2-4e71-aae3-e0f426de5c98"
-)
+KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH = os.environ.get(
     "KALSHI_PRIVATE_KEY_PATH",
     str(KEYS_DIR / "kalshi_private_key.pem")
@@ -74,11 +75,13 @@ SIGMA_SAMEDAY_PM = 0.5    # σ_1day × 0.41 (√t scaling)
 FORECAST_BIAS    = 0.0    # Keep — bias is negligible   
 
 # --- Trading Thresholds ------------------------------------------------------
-MIN_EDGE = 0.08          # 8% minimum edge over market price
+MIN_EDGE = 0.15          # 15% entry edge threshold
+EXIT_EDGE = 0.45         # 45% target edge for exits/reductions
 MIN_CONTRACTS = 5        # Below this, fees dominate
-MAX_RISK_PER_TRADE = 5.0 # $5.00 max risk per trade (10% of $50 bankroll)
-MAX_DAILY_EXPOSURE = 15.0 # $15 max open at once (30% of bankroll)
+MAX_RISK_PER_TRADE = 2.0 # $2.00 max risk per trade
+MAX_DAILY_EXPOSURE = 10.0 # Hard daily risk cap
 MAX_OPEN_POSITIONS = 3
+MAX_TRADES_PER_RUN = 5
 MAX_SPREAD = 0.12        # Don't trade if bid-ask spread > 12 cents
 MIN_VOLUME_24H = 50      # Minimum 24h volume in contracts
 
@@ -97,6 +100,7 @@ SCAN_INTERVAL_SECONDS = 120
 ORDER_TIMEOUT_SECONDS = 600
 MAX_CANCELS_PER_MINUTE = 3
 USE_MAKER_ORDERS_ONLY = True
+LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").strip().lower() == "true"
 
 # --- Paper Trading -----------------------------------------------------------
 PAPER_TRADES_PATH = PROJECT_ROOT / "reports" / "paper_trades.jsonl"

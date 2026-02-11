@@ -19,7 +19,7 @@ import pandas as pd
 
 import config
 from backtest import load_forecasts, load_observations, load_trades
-from test_backtest_ab import BacktestConfig, compute_stats, run_backtest, _per_day_sigma_ens
+from test_backtest_ab import BacktestConfig, compute_stats, run_backtest
 
 
 def _build_lookups(forecasts_df, obs_df):
@@ -81,7 +81,24 @@ def _scenario_configs(fill_rate, slippage, sigma_v2):
         variable_sigma=True,
         sigma_base=1.2,
     )
-    return old_cfg, new_fixed_cfg, new_var_cfg
+    new_hist_cfg = BacktestConfig(
+        name="E: V2-historical",
+        sigma=0.0,
+        min_edge=0.08,
+        forecast_bias=0.0,
+        use_confidence_gates=False,
+        use_dynamic_edge=False,
+        boundary_z_boost=False,
+        use_kelly=True,
+        bankroll=50.0,
+        maker_fill_rate=fill_rate,
+        slippage_cents=slippage,
+        max_risk_per_trade=5.0,
+        min_contracts=5,
+        historical_sigma=True,
+        sigma_base=1.2,
+    )
+    return old_cfg, new_fixed_cfg, new_var_cfg, new_hist_cfg
 
 
 def main():
@@ -117,13 +134,23 @@ def main():
 
     rows = []
     for sc in scenarios:
-        old_cfg, fixed_cfg, var_cfg = _scenario_configs(sc["fill_rate"], sc["slippage"], sigma_v2)
+        old_cfg, fixed_cfg, var_cfg, hist_cfg = _scenario_configs(sc["fill_rate"], sc["slippage"], sigma_v2)
         old_trades, _ = run_backtest(old_cfg, trades_df, forecast_lookup, obs_lookup)
         fixed_trades, _ = run_backtest(fixed_cfg, trades_df, forecast_lookup, obs_lookup)
         var_trades, _ = run_backtest(var_cfg, trades_df, forecast_lookup, obs_lookup)
+        hist_trades, _ = run_backtest(hist_cfg, trades_df, forecast_lookup, obs_lookup)
         old_stats = compute_stats(old_trades)
         fixed_stats = compute_stats(fixed_trades)
         var_stats = compute_stats(var_trades)
+        hist_stats = compute_stats(hist_trades)
+
+        candidate_pnls = {
+            "OLD": old_stats["total_pnl"],
+            "FIXED": fixed_stats["total_pnl"],
+            "VAR": var_stats["total_pnl"],
+            "HIST": hist_stats["total_pnl"],
+        }
+        winner = max(candidate_pnls, key=candidate_pnls.get)
 
         row = {
             "scenario": sc["name"],
@@ -132,48 +159,55 @@ def main():
             "old_trades": old_stats["n"],
             "fixed_trades": fixed_stats["n"],
             "var_trades": var_stats["n"],
+            "hist_trades": hist_stats["n"],
             "old_win_rate": old_stats["win_rate"],
             "fixed_win_rate": fixed_stats["win_rate"],
             "var_win_rate": var_stats["win_rate"],
+            "hist_win_rate": hist_stats["win_rate"],
             "old_pnl": old_stats["total_pnl"],
             "fixed_pnl": fixed_stats["total_pnl"],
             "var_pnl": var_stats["total_pnl"],
+            "hist_pnl": hist_stats["total_pnl"],
             "fixed_delta": fixed_stats["total_pnl"] - old_stats["total_pnl"],
             "var_delta": var_stats["total_pnl"] - old_stats["total_pnl"],
+            "hist_delta": hist_stats["total_pnl"] - old_stats["total_pnl"],
             "old_drawdown": old_stats["max_drawdown"],
             "fixed_drawdown": fixed_stats["max_drawdown"],
             "var_drawdown": var_stats["max_drawdown"],
-            "var_beats_old": var_stats["total_pnl"] > old_stats["total_pnl"],
+            "hist_drawdown": hist_stats["max_drawdown"],
+            "winner": winner,
+            "hist_beats_old": hist_stats["total_pnl"] > old_stats["total_pnl"],
         }
         rows.append(row)
 
-    print("  %-18s %6s %5s %10s %10s %10s %8s %8s %8s" % (
-        "Scenario", "Fill", "Slip", "Old PnL", "Fixed PnL", "Var PnL",
-        "Δ-fixed", "Δ-var", "Winner"
+    print("  %-18s %6s %5s %10s %10s %10s %10s %8s %8s %8s %8s" % (
+        "Scenario", "Fill", "Slip", "Old PnL", "Fixed PnL", "Var PnL", "Hist PnL",
+        "Δ-fixed", "Δ-var", "Δ-hist", "Winner"
     ))
-    print("  " + "-" * 95)
+    print("  " + "-" * 122)
     for row in rows:
-        winner = "VAR" if row["var_beats_old"] else "OLD"
-        print("  %-18s %6.2f %5d %10.2f %10.2f %10.2f %+8.2f %+8.2f %8s" % (
+        print("  %-18s %6.2f %5d %10.2f %10.2f %10.2f %10.2f %+8.2f %+8.2f %+8.2f %8s" % (
             row["scenario"],
             row["fill_rate"],
             row["extra_slippage_cents"],
             row["old_pnl"],
             row["fixed_pnl"],
             row["var_pnl"],
+            row["hist_pnl"],
             row["fixed_delta"],
             row["var_delta"],
-            winner,
+            row["hist_delta"],
+            row["winner"],
         ))
 
-    wins = sum(1 for row in rows if row["var_beats_old"])
+    hist_wins = sum(1 for row in rows if row["hist_beats_old"])
     print("")
-    print("V2-variable beats Old in %d/%d scenarios." % (wins, len(rows)))
+    print("V2-historical beats Old in %d/%d scenarios." % (hist_wins, len(rows)))
 
     out = {
         "sigma_v2": sigma_v2,
         "scenarios": rows,
-        "new_wins_scenarios": wins,
+        "historical_wins_scenarios": hist_wins,
         "total_scenarios": len(rows),
     }
     out_path = config.PROJECT_ROOT / "reports" / "robustness_sweep.json"

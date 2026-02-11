@@ -149,8 +149,7 @@ class MetarObserver:
 
     def _check_day_rollover(self):
         """Reset observation history at midnight ET."""
-        et_offset = timezone(timedelta(hours=-5))
-        today = datetime.now(et_offset).date()
+        today = datetime.now(config.MARKET_TZ).date()
         if self._today_date != today:
             self._obs_history.clear()
             self._residual_ewma = None

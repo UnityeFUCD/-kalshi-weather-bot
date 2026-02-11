@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import statistics
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ logger = logging.getLogger("nbm_shadow")
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
-_ET = timezone(timedelta(hours=-5))
+_ET = config.MARKET_TZ
 _NBM_PERCENTILE_DAILY_VARS = [
     "temperature_2m_max",
     "temperature_2m_max_p10",

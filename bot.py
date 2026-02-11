@@ -92,10 +92,17 @@ class WeatherBot:
             self.nws = NWSClient()
 
         # ALWAYS create auth -- production requires it even for public endpoints
+        if not config.KALSHI_API_KEY_ID:
+            raise RuntimeError("KALSHI_API_KEY_ID is required via environment variable.")
+
         auth = KalshiAuth(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)
         self.kalshi = KalshiClient(auth=auth)
 
         if mode == "live":
+            if not config.LIVE_TRADING:
+                raise RuntimeError(
+                    "Live trading blocked. Set LIVE_TRADING=true to enable real order placement."
+                )
             self.logger.info("LIVE MODE -- real money at risk")
         else:
             self.logger.info("Mode: %s", mode)
@@ -175,8 +182,7 @@ class WeatherBot:
         ensemble = self._ensemble_forecasters[mc.series_ticker]
 
         # -- Step 1: Determine target date and base sigma --
-        et_offset = timezone(timedelta(hours=-5))
-        now_et = datetime.now(et_offset)
+        now_et = datetime.now(config.MARKET_TZ)
         hour_et = now_et.hour
 
         if hour_et >= 8:
@@ -368,12 +374,12 @@ class WeatherBot:
         if target_date == now_et.date():
             # Same-day: settlement is ~midnight local, but markets close earlier
             settlement_approx = datetime(now_et.year, now_et.month, now_et.day,
-                                         23, 59, tzinfo=et_offset)
+                                         23, 59, tzinfo=config.MARKET_TZ)
             hours_to_settlement = (settlement_approx - now_et).total_seconds() / 3600.0
         else:
             # Next-day: at least 24+ hours away
             settlement_approx = datetime(target_date.year, target_date.month,
-                                         target_date.day, 23, 59, tzinfo=et_offset)
+                                         target_date.day, 23, 59, tzinfo=config.MARKET_TZ)
             hours_to_settlement = (settlement_approx - now_et).total_seconds() / 3600.0
 
         if hours_to_settlement is not None and hours_to_settlement < config.NO_TRADE_WITHIN_HOURS_OF_SETTLEMENT:
@@ -430,7 +436,7 @@ class WeatherBot:
             self.logger.info("  %-40s bid=%sc ask=%sc spread=%sc vol=%5d P=%.3f",
                            m.ticker, bid_str, ask_str, spread_str, m.volume, p_model)
 
-        # -- Step 3b: Confidence scoring (Phase 4C) -- LOG ONLY, no blocking --
+        # -- Step 3b: Confidence scoring (Phase 4C) --
         boundaries = extract_bucket_boundaries(buckets)
         boundary_z = compute_boundary_z(mu, sigma, boundaries)
 
@@ -445,15 +451,17 @@ class WeatherBot:
             hour_et=hour_et,
         )
 
+        dynamic_edge = compute_dynamic_min_edge(hour_et, confidence)
         self._last_confidence = confidence
-        self._last_dynamic_edge = config.MIN_EDGE
+        self._last_dynamic_edge = dynamic_edge
 
-        self.logger.info("Confidence: %.3f | Gates: %s | Boundary z: %s (INFO ONLY, not blocking)",
+        self.logger.info("Confidence: %.3f | Gates: %s | Boundary z: %s | MIN_EDGE=%.1f%%",
                         confidence,
                         {k: "%.2f" % v for k, v in gate_scores.items()},
-                        "%.2f" % boundary_z if boundary_z is not None else "N/A")
+                        "%.2f" % boundary_z if boundary_z is not None else "N/A",
+                        dynamic_edge * 100)
 
-        # -- Step 4: Generate Signals (flat MIN_EDGE) --
+        # -- Step 4: Generate Signals (dynamic MIN_EDGE) --
         filtered_prices = {}
         for ticker, price in market_prices.items():
             if 0.05 <= price <= 0.95:
@@ -462,7 +470,13 @@ class WeatherBot:
                 self.logger.info("  Skipping %s: price=%.2f (near-settled)", ticker, price)
 
         signals = compute_signals(buckets, filtered_prices, mu, sigma,
-                                  min_edge=config.MIN_EDGE)
+                                  min_edge=dynamic_edge)
+
+        if hour_et < 6:
+            predawn_ok, predawn_reason = passes_predawn_gates(confidence, dynamic_edge, boundary_z)
+            if not predawn_ok:
+                self.logger.info("Predawn gate blocked trading: %s", predawn_reason)
+                signals = []
 
         # Shadow-log NBM prediction (non-blocking, failures don't affect trading)
         try:
@@ -480,10 +494,10 @@ class WeatherBot:
 
         if not signals:
             self.logger.info("No signals -- no edge above %.1f%% threshold",
-                            config.MIN_EDGE * 100)
+                            dynamic_edge * 100)
             self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                       buckets, market_prices, [],
-                                      confidence=confidence, dynamic_edge=config.MIN_EDGE,
+                                      confidence=confidence, dynamic_edge=dynamic_edge,
                                       boundary_z=boundary_z,
                                       ensemble_mean=_ens_mean)
             return []
@@ -508,7 +522,7 @@ class WeatherBot:
         # Accumulate signal report section for this market
         self._write_signal_report(mc, target_date, forecast_temp, mu, sigma,
                                   buckets, market_prices, signals,
-                                  confidence=confidence, dynamic_edge=config.MIN_EDGE,
+                                  confidence=confidence, dynamic_edge=dynamic_edge,
                                   boundary_z=boundary_z,
                                   ensemble_mean=_ens_mean)
 
@@ -602,8 +616,7 @@ class WeatherBot:
     def _flush_signal_report(self):
         """Write the combined signal report (all markets) to signals.txt."""
         try:
-            mt = timezone(timedelta(hours=-7))
-            now_mt = datetime.now(mt)
+            now_mt = datetime.now(config.OWNER_TZ)
 
             header = []
             header.append("=" * 60)
@@ -695,7 +708,11 @@ class WeatherBot:
             for m in markets:
                 market_lookup[m.ticker] = m
 
+        trades_executed = 0
         for s in signals:
+            if trades_executed >= config.MAX_TRADES_PER_RUN:
+                self.logger.info("Reached MAX_TRADES_PER_RUN=%d", config.MAX_TRADES_PER_RUN)
+                break
             count = self._compute_position_size(s)
             if count == 0:
                 continue
@@ -718,6 +735,7 @@ class WeatherBot:
                 risk,
                 position_detail=self._build_position_detail(s, count, fee_dollars=fee),
             )
+            trades_executed += 1
 
             # Log to structured JSONL
             if hasattr(self, 'paper_tracker'):
@@ -737,7 +755,11 @@ class WeatherBot:
 
     def _live_trade(self, signals, markets):
         """Execute real trades on Kalshi."""
+        trades_executed = 0
         for s in signals:
+            if trades_executed >= config.MAX_TRADES_PER_RUN:
+                self.logger.info("Reached MAX_TRADES_PER_RUN=%d", config.MAX_TRADES_PER_RUN)
+                break
             count = self._compute_position_size(s)
             if count < config.MIN_CONTRACTS:
                 self.logger.info("  Skip %s: count=%d < min=%d",
@@ -781,6 +803,7 @@ class WeatherBot:
                         risk,
                         position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
                     )
+                    trades_executed += 1
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
@@ -807,6 +830,7 @@ class WeatherBot:
                         risk,
                         position_detail=self._build_position_detail(s, count, fee_dollars=0.0),
                     )
+                    trades_executed += 1
                     self.logger.info("  OK ORDER PLACED: %s", result)
                 except Exception as e:
                     self.logger.error("  FAIL ORDER: %s", e)
@@ -888,8 +912,7 @@ class WeatherBot:
         while True:
             # Market hours check
             if until_hour_mt is not None:
-                mt = timezone(timedelta(hours=-7))
-                now_mt = datetime.now(mt)
+                now_mt = datetime.now(config.OWNER_TZ)
                 if now_mt.hour >= until_hour_mt:
                     self.logger.info("Past %d:00 MT -- auto-exiting market window", until_hour_mt)
                     break

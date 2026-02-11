@@ -665,11 +665,21 @@ def main():
     parser.add_argument("--market", default="KXHIGHNY", help="Market ticker")
     parser.add_argument("--date", type=str, default=None, help="Specific date (YYYY-MM-DD)")
     parser.add_argument("--list", action="store_true", help="List all settlements")
+    parser.add_argument(
+        "--reconcile-shadow",
+        action="store_true",
+        help="Run phase 4.5 nightly reconciliation for paper + shadow logs",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     db = SettlementDB()
+
+    if args.reconcile_shadow:
+        result = reconcile_all_shadow_records(run_paper_reconcile=True)
+        print(json.dumps(result, indent=2))
+        return
 
     if args.list:
         print("=" * 60)
@@ -679,10 +689,10 @@ def main():
         if not settlements:
             print("  (empty)")
         else:
-            print("  %-12s %-12s %6s %8s" % ("Market", "Date", "Tmax", "Source"))
-            print("  " + "-" * 44)
+            print("  %-12s %-12s %6s %12s" % ("Market", "Date", "Tmax", "Source"))
+            print("  " + "-" * 48)
             for s in settlements:
-                print("  %-12s %-12s %5dF %8s" % (
+                print("  %-12s %-12s %5dF %12s" % (
                     s["series_ticker"], s["date"], s["tmax_f"], s["source"]))
         return
 
@@ -691,18 +701,30 @@ def main():
     print("Market: %s" % args.market)
     print("=" * 60)
 
+    if args.date:
+        target_date = date.fromisoformat(args.date)
+        settlement = get_settlement_value(
+            target_date=target_date,
+            series_ticker=args.market,
+            db=db,
+        )
+        if settlement:
+            print("\nRequested date: %s" % target_date)
+            print("Max temp:       %dF" % settlement["tmax_f"])
+            print("Source:         %s (%s)" % (
+                settlement.get("source", "unknown"),
+                settlement.get("confidence", "unknown"),
+            ))
+        else:
+            print("\nNo settlement available for %s yet." % target_date)
+            print("Checked DB, live CLI report, and GHCN fallback.")
+        return
+
     report_date, tmax = scrape_and_record(args.market, db)
 
     if report_date and tmax is not None:
         print("\nReport date: %s" % report_date)
         print("Max temp:    %dF" % tmax)
-
-        # Check if requested date matches
-        if args.date:
-            req_date = date.fromisoformat(args.date)
-            if req_date != report_date:
-                print("\nWARNING: Requested %s but report is for %s" % (req_date, report_date))
-                print("CLI report may not be available yet for requested date.")
     else:
         print("\nCould not extract settlement data.")
         print("CLI report may not be published yet.")

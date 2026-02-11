@@ -356,8 +356,7 @@ if __name__ == "__main__":
     tracker = DeltaTracker(mc.series_ticker)
 
     # Get target date
-    et_offset = timezone(timedelta(hours=-5))
-    now_et = datetime.now(et_offset)
+    now_et = datetime.now(config.MARKET_TZ)
     if now_et.hour >= 8:
         target = (now_et + timedelta(days=1)).date()
     else:

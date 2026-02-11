@@ -265,8 +265,7 @@ if __name__ == "__main__":
         print("  Today's forecasted high: %dF" % high)
 
     print("\n[2] Tomorrow's forecast...")
-    et_offset = timezone(timedelta(hours=-5))
-    tomorrow = (datetime.now(et_offset) + timedelta(days=1)).date()
+    tomorrow = (datetime.now(config.MARKET_TZ) + timedelta(days=1)).date()
     temp, name = nws.get_high_forecast_for_date(tomorrow)
     if temp is not None:
         print("  Tomorrow (%s, %s) forecasted high: %dF" % (tomorrow, name, temp))
