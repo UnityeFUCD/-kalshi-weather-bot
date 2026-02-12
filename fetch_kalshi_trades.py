@@ -272,7 +272,10 @@ def list_markets_for_series(series_ticker: str, days_back: int) -> list[dict]:
 
     markets = []
     cursor = None
+    seen_cursors = set()
+    page = 0
     while True:
+        page += 1
         params = {
             "series_ticker": series_ticker,
             "min_close_ts": min_close_ts,
@@ -287,8 +290,18 @@ def list_markets_for_series(series_ticker: str, days_back: int) -> list[dict]:
         j = r.json()
 
         markets.extend(j.get("markets", []))
-        cursor = j.get("cursor")
-        if not cursor:
+        next_cursor = j.get("cursor")
+
+        if not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            logger.warning("Stopping market pagination on repeated cursor: %s", next_cursor)
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+        if page >= 200:
+            logger.warning("Stopping market pagination at safety page cap (%d)", page)
             break
 
     return markets
@@ -298,7 +311,10 @@ def fetch_trades_for_market(market_ticker: str, min_ts: int) -> list[dict]:
     """Fetch all trades for one market ticker since min_ts."""
     trades = []
     cursor = None
+    seen_cursors = set()
+    page = 0
     while True:
+        page += 1
         params = {"ticker": market_ticker, "min_ts": min_ts, "limit": 1000}
         if cursor:
             params["cursor"] = cursor
@@ -308,8 +324,17 @@ def fetch_trades_for_market(market_ticker: str, min_ts: int) -> list[dict]:
         j = r.json()
 
         trades.extend(j.get("trades", []))
-        cursor = j.get("cursor")
-        if not cursor:
+        next_cursor = j.get("cursor")
+        if not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            logger.warning("Stopping trade pagination on repeated cursor for %s", market_ticker)
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+        if page >= 500:
+            logger.warning("Stopping trade pagination at safety page cap (%d) for %s", page, market_ticker)
             break
 
     return trades

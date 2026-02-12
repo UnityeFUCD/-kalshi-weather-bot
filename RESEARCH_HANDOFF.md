@@ -89,10 +89,12 @@ Fee is quadratic in price -- maximum at 50c, zero at extremes.
 |-----------|-------|--------|
 | `SIGMA_1DAY` (sigma_base) | 1.20 F | Calibrated from GHCN vs Open-Meteo historical forecasts |
 | `FORECAST_BIAS` | 0.0 F | Calibration showed negligible bias |
-| `MIN_EDGE` | 8% (0.08) | Flat threshold, no time-of-day scaling |
+| `MIN_EDGE` | 15% base (0.15) | Runtime uses confidence/time dynamic edge from this base |
 | `ENSEMBLE_ALPHA` | 1.1 | Scale factor on ensemble spread |
 | `BANKROLL` | $50.00 | Current account size |
-| `MAX_RISK_PER_TRADE` | $5.00 | 10% of bankroll |
+| `MAX_RISK_PER_TRADE` | $2.00 | Runtime risk cap per trade |
+| `MAX_DAILY_EXPOSURE` | $10.00 | Runtime hard daily risk cap |
+| `MAX_TRADES_PER_RUN` | 5 | Runtime cycle cap |
 | `MIN_CONTRACTS` | 5 | Below this, fees dominate |
 | `MAKER_FILL_RATE` | 70% | Conservative assumption for backtest |
 | `MAX_OPEN_POSITIONS` | 3 | Per day cap |
