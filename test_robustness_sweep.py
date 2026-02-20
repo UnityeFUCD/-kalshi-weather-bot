@@ -104,6 +104,12 @@ def _scenario_configs(fill_rate, slippage, sigma_v2):
 def main():
     parser = argparse.ArgumentParser(description="Robustness sweep for old vs new model")
     parser.add_argument("--sigma-ens", type=float, default=1.3, help="Average ensemble sigma estimate")
+    parser.add_argument(
+        "--min-trades",
+        type=int,
+        default=100,
+        help="Minimum required trade rows before running sweep (prevents silent zero-PnL runs).",
+    )
     args = parser.parse_args()
 
     print("=" * 88)
@@ -116,6 +122,14 @@ def main():
     if trades_df is None or forecasts_df is None or obs_df is None:
         print("Missing required datasets.")
         return
+
+    if len(trades_df) < args.min_trades:
+        print(
+            "Insufficient trades for robustness sweep: "
+            f"found {len(trades_df)}, require >= {args.min_trades}."
+        )
+        print("Refresh market history (e.g., fetch_kalshi_trades.py) before re-running.")
+        raise SystemExit(2)
 
     trades_df["trade_date"] = pd.to_datetime(trades_df["trade_date"]).dt.date
     forecast_lookup, obs_lookup = _build_lookups(forecasts_df, obs_df)
